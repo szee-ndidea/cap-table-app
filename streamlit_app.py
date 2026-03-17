@@ -351,9 +351,9 @@ with tab4:
     )
 
     st.divider()
-    st.subheader("Uploads / Catch-up")
+    st.subheader("Uploads / Resume")
 
-    st.write("Upload prior CSVs here so you can continue without restarting.")
+    st.write("Upload prior CSVs here so you can resume without restarting.")
 
     uploaded_cap = st.file_uploader(
         "Upload cap table CSV",
