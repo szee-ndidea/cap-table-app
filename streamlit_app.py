@@ -16,6 +16,9 @@ ROUND_COLUMNS = [
     "discount_pct",
     "interest_rate_pct",
     "maturity_date",
+    "liq_pref_multiple",
+    "participating",
+    "participation_cap_multiple",
 ]
 
 if "cap_table" not in st.session_state:
@@ -70,8 +73,43 @@ def normalize_round_history(df: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
-tab1, tab2, tab3, tab4 = st.tabs(
-    ["Starting Cap Table", "Funding Round", "Current Cap Table", "Downloads / Uploads"]
+def parse_exit_values(text: str):
+    values = []
+    for part in text.split(","):
+        cleaned = part.strip().replace("$", "").replace(",", "")
+        if cleaned == "":
+            continue
+        try:
+            val = float(cleaned)
+            if val >= 0:
+                values.append(val)
+        except ValueError:
+            pass
+    return values
+
+
+def build_exit_sensitivity_table(cap_table: pd.DataFrame, exit_values: list[float]) -> pd.DataFrame:
+    current = recalc_ownership(cap_table)
+    if current.empty or not exit_values:
+        return pd.DataFrame()
+
+    result = current[["holder", "security_type", "class", "shares", "ownership_pct"]].copy()
+
+    for exit_value in exit_values:
+        col_name = f"${exit_value:,.0f}"
+        result[col_name] = result["ownership_pct"] * exit_value
+
+    return result
+
+
+tab1, tab2, tab3, tab4, tab5 = st.tabs(
+    [
+        "Starting Cap Table",
+        "Funding Round",
+        "Current Cap Table",
+        "Downloads / Uploads",
+        "Exit Analysis",
+    ]
 )
 
 with tab1:
@@ -126,6 +164,9 @@ with tab2:
         discount_pct = None
         interest_rate_pct = None
         maturity_date = None
+        liq_pref_multiple = None
+        participating = None
+        participation_cap_multiple = None
 
         if round_type == "Equity":
             pre_money_valuation = st.number_input(
@@ -135,6 +176,32 @@ with tab2:
                 step=1000.0,
                 format="%g",
             )
+
+            st.markdown("### Preferred stock terms")
+            liq_pref_multiple = st.number_input(
+                "Liquidation preference multiple (x)",
+                min_value=0.0,
+                value=1.0,
+                step=0.1,
+                format="%g",
+            )
+            participating = st.checkbox("Participating preferred", value=False)
+
+            if participating:
+                has_participation_cap = st.checkbox("Participation cap", value=False)
+                if has_participation_cap:
+                    participation_cap_multiple = st.number_input(
+                        "Participation cap multiple (x)",
+                        min_value=0.0,
+                        value=3.0,
+                        step=0.1,
+                        format="%g",
+                    )
+                else:
+                    participation_cap_multiple = None
+            else:
+                participation_cap_multiple = None
+
         elif round_type == "SAFE":
             valuation_cap = st.number_input(
                 "Valuation cap ($)",
@@ -233,6 +300,9 @@ with tab2:
                     "discount_pct": discount_pct,
                     "interest_rate_pct": interest_rate_pct,
                     "maturity_date": maturity_date,
+                    "liq_pref_multiple": liq_pref_multiple,
+                    "participating": participating,
+                    "participation_cap_multiple": participation_cap_multiple,
                 }]
             )
             st.session_state.round_history = pd.concat(
@@ -381,3 +451,43 @@ with tab4:
             st.rerun()
         except Exception as e:
             st.error(f"Could not load files: {e}")
+
+with tab5:
+    st.subheader("Exit sensitivity analysis")
+    st.caption("This version uses simple pro rata ownership based on the current cap table.")
+
+    current = recalc_ownership(st.session_state.cap_table)
+
+    if current.empty:
+        st.info("Add a cap table first before running exit analysis.")
+    else:
+        exit_values_text = st.text_area(
+            "Enter exit values separated by commas ($)",
+            value="10000000, 50000000, 100000000, 150000000, 200000000",
+            help="Example: 10000000, 50000000, 100000000",
+        )
+
+        exit_values = parse_exit_values(exit_values_text)
+
+        if st.button("Run exit sensitivity"):
+            if not exit_values:
+                st.error("Please enter at least one valid exit value.")
+            else:
+                sensitivity_df = build_exit_sensitivity_table(current, exit_values)
+
+                display_df = sensitivity_df.copy()
+                display_df["ownership_pct"] = display_df["ownership_pct"].map(lambda x: f"{x:.2%}")
+
+                dollar_cols = [c for c in display_df.columns if c.startswith("$")]
+                for col in dollar_cols:
+                    display_df[col] = display_df[col].map(lambda x: f"${x:,.2f}")
+
+                st.write("### Exit proceeds by holder")
+                st.dataframe(display_df, use_container_width=True)
+
+                st.download_button(
+                    "Download exit sensitivity CSV",
+                    data=to_csv_bytes(sensitivity_df),
+                    file_name="exit_sensitivity.csv",
+                    mime="text/csv",
+                )
