@@ -1,24 +1,48 @@
 import pandas as pd
 import streamlit as st
+from datetime import date, datetime
 
 st.set_page_config(page_title="Cap Table App", layout="wide")
 
 st.title("Cap Table App")
-st.caption("Cap Table Management, Funding Rounds, and Exit Calculations")
+st.caption("Cap Table Management, Funding Rounds, SAFE / Note Conversion, and Exit Calculations")
 
 CAP_COLUMNS = ["holder", "security_type", "class", "shares"]
+
 ROUND_COLUMNS = [
     "round_type",
     "round_name",
+    "round_date",
     "pre_money_valuation",
     "amount_raised",
     "valuation_cap",
     "discount_pct",
     "interest_rate_pct",
+    "issue_date",
     "maturity_date",
     "liq_pref_multiple",
     "participating",
     "participation_cap_multiple",
+]
+
+FINANCING_COLUMNS = [
+    "status",
+    "instrument_type",
+    "round_name",
+    "round_date",
+    "investor_name",
+    "amount_invested",
+    "principal_invested",
+    "valuation_cap",
+    "discount_pct",
+    "interest_rate_pct",
+    "issue_date",
+    "maturity_date",
+    "converted_in_round",
+    "converted_on_date",
+    "conversion_amount",
+    "conversion_price",
+    "shares_issued",
 ]
 
 if "cap_table" not in st.session_state:
@@ -27,6 +51,9 @@ if "cap_table" not in st.session_state:
 if "round_history" not in st.session_state:
     st.session_state.round_history = pd.DataFrame(columns=ROUND_COLUMNS)
 
+if "financing_details" not in st.session_state:
+    st.session_state.financing_details = pd.DataFrame(columns=FINANCING_COLUMNS)
+
 
 def empty_cap_table():
     return pd.DataFrame(columns=CAP_COLUMNS)
@@ -34,6 +61,10 @@ def empty_cap_table():
 
 def empty_round_history():
     return pd.DataFrame(columns=ROUND_COLUMNS)
+
+
+def empty_financing_details():
+    return pd.DataFrame(columns=FINANCING_COLUMNS)
 
 
 def recalc_ownership(df: pd.DataFrame) -> pd.DataFrame:
@@ -73,6 +104,15 @@ def normalize_round_history(df: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
+def normalize_financing_details(df: pd.DataFrame) -> pd.DataFrame:
+    out = df.copy()
+    for c in FINANCING_COLUMNS:
+        if c not in out.columns:
+            out[c] = None
+    out = out[FINANCING_COLUMNS].copy()
+    return out
+
+
 def parse_exit_values(text: str):
     values = []
     for part in text.split(","):
@@ -102,13 +142,151 @@ def build_exit_sensitivity_table(cap_table: pd.DataFrame, exit_values: list[floa
     return result
 
 
+def date_to_str(d):
+    if d is None or d == "":
+        return None
+    if isinstance(d, str):
+        return d
+    return d.isoformat()
+
+
+def str_to_date(value):
+    if value is None or value == "" or (isinstance(value, float) and pd.isna(value)):
+        return None
+    if isinstance(value, date):
+        return value
+    try:
+        return datetime.fromisoformat(str(value)).date()
+    except Exception:
+        return None
+
+
+def days_between(start_date, end_date):
+    s = str_to_date(start_date)
+    e = str_to_date(end_date)
+    if s is None or e is None:
+        return 0
+    return max((e - s).days, 0)
+
+
+def simple_interest(principal, annual_rate_pct, start_date, end_date):
+    if principal is None or pd.isna(principal):
+        return 0.0
+    if annual_rate_pct is None or annual_rate_pct == "" or pd.isna(annual_rate_pct):
+        return 0.0
+    days = days_between(start_date, end_date)
+    return float(principal) * (float(annual_rate_pct) / 100.0) * (days / 365.0)
+
+
+def outstanding_convertibles(financing_df: pd.DataFrame) -> pd.DataFrame:
+    if financing_df.empty:
+        return financing_df.copy()
+    out = financing_df.copy()
+    out["status"] = out["status"].fillna("outstanding")
+    mask = out["instrument_type"].isin(["SAFE", "Convertible Note"]) & (out["status"] == "outstanding")
+    return out.loc[mask].copy()
+
+
+def build_conversion_rows(
+    financing_df: pd.DataFrame,
+    equity_round_name: str,
+    equity_round_date,
+    round_price: float,
+    pre_round_fd_shares: float,
+):
+    outstanding = outstanding_convertibles(financing_df)
+    if outstanding.empty:
+        return [], financing_df.copy(), pd.DataFrame()
+
+    cap_rows = []
+    conversion_summary_rows = []
+    updated_financing = financing_df.copy()
+
+    for idx, row in outstanding.iterrows():
+        instrument_type = row.get("instrument_type")
+        investor_name = row.get("investor_name")
+
+        valuation_cap = pd.to_numeric(row.get("valuation_cap"), errors="coerce")
+        discount_pct = pd.to_numeric(row.get("discount_pct"), errors="coerce")
+        interest_rate_pct = pd.to_numeric(row.get("interest_rate_pct"), errors="coerce")
+
+        if instrument_type == "SAFE":
+            base_amount = pd.to_numeric(row.get("amount_invested"), errors="coerce")
+            accrued_interest = 0.0
+        else:
+            principal = pd.to_numeric(row.get("principal_invested"), errors="coerce")
+            accrued_interest = simple_interest(
+                principal,
+                interest_rate_pct,
+                row.get("issue_date"),
+                equity_round_date,
+            )
+            base_amount = (0.0 if pd.isna(principal) else float(principal)) + accrued_interest
+
+        if pd.isna(base_amount) or base_amount <= 0:
+            continue
+
+        candidate_prices = []
+
+        if pd.notna(valuation_cap) and valuation_cap > 0 and pre_round_fd_shares > 0:
+            cap_price = float(valuation_cap) / float(pre_round_fd_shares)
+            candidate_prices.append(cap_price)
+        else:
+            cap_price = None
+
+        if pd.notna(discount_pct) and discount_pct > 0:
+            discount_price = round_price * (1.0 - float(discount_pct) / 100.0)
+            candidate_prices.append(discount_price)
+        else:
+            discount_price = None
+
+        candidate_prices.append(round_price)
+        conversion_price = min([p for p in candidate_prices if p is not None and p > 0])
+
+        shares_issued = float(base_amount) / float(conversion_price)
+
+        cap_rows.append(
+            {
+                "holder": investor_name,
+                "security_type": "Preferred",
+                "class": equity_round_name,
+                "shares": shares_issued,
+            }
+        )
+
+        updated_financing.at[idx, "status"] = "converted"
+        updated_financing.at[idx, "converted_in_round"] = equity_round_name
+        updated_financing.at[idx, "converted_on_date"] = date_to_str(equity_round_date)
+        updated_financing.at[idx, "conversion_amount"] = float(base_amount)
+        updated_financing.at[idx, "conversion_price"] = float(conversion_price)
+        updated_financing.at[idx, "shares_issued"] = float(shares_issued)
+
+        conversion_summary_rows.append(
+            {
+                "investor_name": investor_name,
+                "instrument_type": instrument_type,
+                "converted_in_round": equity_round_name,
+                "conversion_amount": float(base_amount),
+                "accrued_interest": float(accrued_interest),
+                "cap_price": cap_price,
+                "discount_price": discount_price,
+                "round_price": float(round_price),
+                "conversion_price": float(conversion_price),
+                "shares_issued": float(shares_issued),
+            }
+        )
+
+    summary_df = pd.DataFrame(conversion_summary_rows)
+    return cap_rows, updated_financing, summary_df
+
+
 tab1, tab2, tab3, tab4, tab5 = st.tabs(
     [
         "Starting Cap Table",
         "Funding Round",
         "Current Cap Table",
-        "Downloads / Uploads",
         "Exit Analysis",
+        "Downloads / Uploads",
     ]
 )
 
@@ -149,6 +327,7 @@ with tab1:
     if st.button("Clear all data"):
         st.session_state.cap_table = empty_cap_table()
         st.session_state.round_history = empty_round_history()
+        st.session_state.financing_details = empty_financing_details()
         st.rerun()
 
 with tab2:
@@ -159,10 +338,13 @@ with tab2:
     else:
         round_type = st.selectbox("Round type", ["Equity", "SAFE", "Convertible Note"])
         round_name = st.text_input("Round name / label", value="")
+        round_date = st.date_input("Round / close date", value=date.today())
+
         pre_money_valuation = None
         valuation_cap = None
         discount_pct = None
         interest_rate_pct = None
+        issue_date = round_date
         maturity_date = None
         liq_pref_multiple = None
         participating = None
@@ -218,6 +400,8 @@ with tab2:
                 step=0.5,
                 format="%g",
             )
+            issue_date = st.date_input("SAFE issue date", value=round_date, key="safe_issue_date")
+
         else:
             valuation_cap = st.number_input(
                 "Valuation cap ($)",
@@ -242,7 +426,8 @@ with tab2:
                 step=0.5,
                 format="%g",
             )
-            maturity_date = st.text_input("Maturity date")
+            issue_date = st.date_input("Note issue date", value=round_date, key="note_issue_date")
+            maturity_date = st.date_input("Maturity date", value=round_date, key="note_maturity_date")
 
         st.markdown("### Investor entries")
         investor_count = st.number_input(
@@ -294,12 +479,14 @@ with tab2:
                 [{
                     "round_type": round_type,
                     "round_name": clean_round_name,
+                    "round_date": date_to_str(round_date),
                     "pre_money_valuation": pre_money_valuation,
                     "amount_raised": total_raised,
                     "valuation_cap": valuation_cap,
                     "discount_pct": discount_pct,
                     "interest_rate_pct": interest_rate_pct,
-                    "maturity_date": maturity_date,
+                    "issue_date": date_to_str(issue_date),
+                    "maturity_date": date_to_str(maturity_date),
                     "liq_pref_multiple": liq_pref_multiple,
                     "participating": participating,
                     "participation_cap_multiple": participation_cap_multiple,
@@ -344,16 +531,17 @@ with tab2:
                 )
 
             if round_type == "Equity":
-                pre_round_shares = updated_cap_table["shares"].sum()
+                pre_round_shares = pd.to_numeric(updated_cap_table["shares"], errors="coerce").fillna(0.0).sum()
+
                 if pre_round_shares <= 0 or not pre_money_valuation or pre_money_valuation <= 0:
                     st.error("Need a valid pre-money valuation and at least one existing share.")
                 else:
-                    price_per_share = pre_money_valuation / pre_round_shares
-                    preferred_rows = []
+                    round_price = float(pre_money_valuation) / float(pre_round_shares)
 
+                    preferred_rows = []
                     for inv in investors:
                         if inv["investor_name"] and inv["amount"] > 0:
-                            shares_issued = inv["amount"] / price_per_share
+                            shares_issued = float(inv["amount"]) / float(round_price)
                             preferred_rows.append(
                                 {
                                     "holder": inv["investor_name"],
@@ -363,19 +551,144 @@ with tab2:
                                 }
                             )
 
+                    convertible_rows, financing_updated, conversion_summary = build_conversion_rows(
+                        st.session_state.financing_details,
+                        clean_round_name,
+                        round_date,
+                        round_price,
+                        pre_round_shares,
+                    )
+
                     if preferred_rows:
                         updated_cap_table = pd.concat(
                             [updated_cap_table, pd.DataFrame(preferred_rows)],
                             ignore_index=True,
                         )
 
+                    if convertible_rows:
+                        updated_cap_table = pd.concat(
+                            [updated_cap_table, pd.DataFrame(convertible_rows)],
+                            ignore_index=True,
+                        )
+
                     st.session_state.cap_table = updated_cap_table
-                    st.success(f"Equity round applied at ${price_per_share:,.4f} per share.")
-            else:
+                    st.session_state.financing_details = financing_updated
+
+                    equity_financing_rows = []
+                    for inv in investors:
+                        if inv["investor_name"] and inv["amount"] > 0:
+                            equity_financing_rows.append(
+                                {
+                                    "status": "issued",
+                                    "instrument_type": "Equity",
+                                    "round_name": clean_round_name,
+                                    "round_date": date_to_str(round_date),
+                                    "investor_name": inv["investor_name"],
+                                    "amount_invested": inv["amount"],
+                                    "principal_invested": None,
+                                    "valuation_cap": None,
+                                    "discount_pct": None,
+                                    "interest_rate_pct": None,
+                                    "issue_date": date_to_str(round_date),
+                                    "maturity_date": None,
+                                    "converted_in_round": None,
+                                    "converted_on_date": None,
+                                    "conversion_amount": None,
+                                    "conversion_price": round_price,
+                                    "shares_issued": float(inv["amount"]) / float(round_price),
+                                }
+                            )
+
+                    if equity_financing_rows:
+                        st.session_state.financing_details = pd.concat(
+                            [st.session_state.financing_details, pd.DataFrame(equity_financing_rows)],
+                            ignore_index=True,
+                        )
+
+                    st.success(f"Equity round applied at ${round_price:,.4f} per share.")
+
+                    if not conversion_summary.empty:
+                        st.write("### Converted SAFE / Note instruments")
+                        show_conv = conversion_summary.copy()
+                        for col in [
+                            "conversion_amount",
+                            "accrued_interest",
+                            "cap_price",
+                            "discount_price",
+                            "round_price",
+                            "conversion_price",
+                        ]:
+                            if col in show_conv.columns:
+                                show_conv[col] = show_conv[col].apply(
+                                    lambda x: f"${x:,.4f}" if pd.notnull(x) else ""
+                                )
+                        st.dataframe(show_conv, use_container_width=True)
+
+            elif round_type == "SAFE":
+                safe_rows = []
+                for inv in investors:
+                    if inv["investor_name"] and inv["amount"] > 0:
+                        safe_rows.append(
+                            {
+                                "status": "outstanding",
+                                "instrument_type": "SAFE",
+                                "round_name": clean_round_name,
+                                "round_date": date_to_str(round_date),
+                                "investor_name": inv["investor_name"],
+                                "amount_invested": inv["amount"],
+                                "principal_invested": None,
+                                "valuation_cap": valuation_cap,
+                                "discount_pct": discount_pct,
+                                "interest_rate_pct": None,
+                                "issue_date": date_to_str(issue_date),
+                                "maturity_date": None,
+                                "converted_in_round": None,
+                                "converted_on_date": None,
+                                "conversion_amount": None,
+                                "conversion_price": None,
+                                "shares_issued": None,
+                            }
+                        )
+                if safe_rows:
+                    st.session_state.financing_details = pd.concat(
+                        [st.session_state.financing_details, pd.DataFrame(safe_rows)],
+                        ignore_index=True,
+                    )
                 st.session_state.cap_table = updated_cap_table
-                st.success(
-                    f"{round_type} round stored in round history. Cap table only changed for any common or option updates."
-                )
+                st.success("SAFE round stored. It will convert automatically in a later equity round.")
+
+            else:
+                note_rows = []
+                for inv in investors:
+                    if inv["investor_name"] and inv["amount"] > 0:
+                        note_rows.append(
+                            {
+                                "status": "outstanding",
+                                "instrument_type": "Convertible Note",
+                                "round_name": clean_round_name,
+                                "round_date": date_to_str(round_date),
+                                "investor_name": inv["investor_name"],
+                                "amount_invested": None,
+                                "principal_invested": inv["amount"],
+                                "valuation_cap": valuation_cap,
+                                "discount_pct": discount_pct,
+                                "interest_rate_pct": interest_rate_pct,
+                                "issue_date": date_to_str(issue_date),
+                                "maturity_date": date_to_str(maturity_date),
+                                "converted_in_round": None,
+                                "converted_on_date": None,
+                                "conversion_amount": None,
+                                "conversion_price": None,
+                                "shares_issued": None,
+                            }
+                        )
+                if note_rows:
+                    st.session_state.financing_details = pd.concat(
+                        [st.session_state.financing_details, pd.DataFrame(note_rows)],
+                        ignore_index=True,
+                    )
+                st.session_state.cap_table = updated_cap_table
+                st.success("Convertible note round stored. It will convert automatically in a later equity round.")
 
 with tab3:
     st.subheader("Current cap table")
@@ -393,7 +706,11 @@ with tab3:
         st.info("No rounds added yet.")
     else:
         history_show = st.session_state.round_history.copy()
-        money_cols = ["pre_money_valuation", "amount_raised", "valuation_cap"]
+        money_cols = [
+            "pre_money_valuation",
+            "amount_raised",
+            "valuation_cap",
+        ]
         for col in money_cols:
             if col in history_show.columns:
                 history_show[col] = history_show[col].apply(
@@ -401,58 +718,26 @@ with tab3:
                 )
         st.dataframe(history_show, use_container_width=True)
 
+    st.subheader("Financing details")
+    if st.session_state.financing_details.empty:
+        st.info("No SAFE, note, or equity financing detail yet.")
+    else:
+        details_show = st.session_state.financing_details.copy()
+        money_cols = [
+            "amount_invested",
+            "principal_invested",
+            "valuation_cap",
+            "conversion_amount",
+            "conversion_price",
+        ]
+        for col in money_cols:
+            if col in details_show.columns:
+                details_show[col] = details_show[col].apply(
+                    lambda x: f"${x:,.2f}" if pd.notnull(x) and x != "" else ""
+                )
+        st.dataframe(details_show, use_container_width=True)
+
 with tab4:
-    st.subheader("Downloads")
-
-    current = recalc_ownership(st.session_state.cap_table)
-
-    st.download_button(
-        "Download cap table CSV",
-        data=to_csv_bytes(current),
-        file_name="cap_table_current.csv",
-        mime="text/csv",
-    )
-
-    st.download_button(
-        "Download round history CSV",
-        data=to_csv_bytes(st.session_state.round_history),
-        file_name="round_history.csv",
-        mime="text/csv",
-    )
-
-    st.divider()
-    st.subheader("Uploads / Resume")
-
-    st.write("Upload prior CSVs here so you can resume without restarting.")
-
-    uploaded_cap = st.file_uploader(
-        "Upload cap table CSV",
-        type=["csv"],
-        key="uploaded_cap_table",
-    )
-
-    uploaded_rounds = st.file_uploader(
-        "Upload round history CSV",
-        type=["csv"],
-        key="uploaded_round_history",
-    )
-
-    if st.button("Load uploaded CSVs"):
-        try:
-            if uploaded_cap is not None:
-                cap_df = pd.read_csv(uploaded_cap)
-                st.session_state.cap_table = normalize_cap_table(cap_df)
-
-            if uploaded_rounds is not None:
-                round_df = pd.read_csv(uploaded_rounds)
-                st.session_state.round_history = normalize_round_history(round_df)
-
-            st.success("Uploaded files loaded into the app.")
-            st.rerun()
-        except Exception as e:
-            st.error(f"Could not load files: {e}")
-
-with tab5:
     st.subheader("Exit sensitivity analysis")
     st.caption("This version uses simple pro rata ownership based on the current cap table.")
 
@@ -491,3 +776,71 @@ with tab5:
                     file_name="exit_sensitivity.csv",
                     mime="text/csv",
                 )
+
+with tab5:
+    st.subheader("Downloads")
+
+    current = recalc_ownership(st.session_state.cap_table)
+
+    st.download_button(
+        "Download cap table CSV",
+        data=to_csv_bytes(current),
+        file_name="cap_table_current.csv",
+        mime="text/csv",
+    )
+
+    st.download_button(
+        "Download round history CSV",
+        data=to_csv_bytes(st.session_state.round_history),
+        file_name="round_history.csv",
+        mime="text/csv",
+    )
+
+    st.download_button(
+        "Download financing details CSV",
+        data=to_csv_bytes(st.session_state.financing_details),
+        file_name="financing_details.csv",
+        mime="text/csv",
+    )
+
+    st.divider()
+    st.subheader("Uploads / Resume")
+
+    st.write("Upload prior CSVs here so you can resume without restarting.")
+
+    uploaded_cap = st.file_uploader(
+        "Upload cap table CSV",
+        type=["csv"],
+        key="uploaded_cap_table",
+    )
+
+    uploaded_rounds = st.file_uploader(
+        "Upload round history CSV",
+        type=["csv"],
+        key="uploaded_round_history",
+    )
+
+    uploaded_financing = st.file_uploader(
+        "Upload financing details CSV",
+        type=["csv"],
+        key="uploaded_financing_details",
+    )
+
+    if st.button("Load uploaded CSVs"):
+        try:
+            if uploaded_cap is not None:
+                cap_df = pd.read_csv(uploaded_cap)
+                st.session_state.cap_table = normalize_cap_table(cap_df)
+
+            if uploaded_rounds is not None:
+                round_df = pd.read_csv(uploaded_rounds)
+                st.session_state.round_history = normalize_round_history(round_df)
+
+            if uploaded_financing is not None:
+                financing_df = pd.read_csv(uploaded_financing)
+                st.session_state.financing_details = normalize_financing_details(financing_df)
+
+            st.success("Uploaded files loaded into the app.")
+            st.rerun()
+        except Exception as e:
+            st.error(f"Could not load files: {e}")
