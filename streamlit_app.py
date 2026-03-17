@@ -4,7 +4,7 @@ import streamlit as st
 st.set_page_config(page_title="Cap Table App", layout="wide")
 
 st.title("Cap Table App")
-st.caption("Simple starting cap table + next funding round")
+st.caption("Cap Table Management, Funding Rounds, and Exit Calculations")
 
 CAP_COLUMNS = ["holder", "security_type", "class", "shares"]
 ROUND_COLUMNS = [
@@ -71,7 +71,7 @@ def normalize_round_history(df: pd.DataFrame) -> pd.DataFrame:
 
 
 tab1, tab2, tab3, tab4 = st.tabs(
-    ["Starting Cap Table", "Next Round", "Current Cap Table", "Downloads / Uploads"]
+    ["Starting Cap Table", "Funding Round", "Current Cap Table", "Downloads / Uploads"]
 )
 
 with tab1:
@@ -114,7 +114,7 @@ with tab1:
         st.rerun()
 
 with tab2:
-    st.subheader("Add next funding round")
+    st.subheader("Add funding round")
 
     if st.session_state.cap_table.empty:
         st.info("Add at least one starting cap table row first, or upload prior CSVs in Downloads / Uploads.")
@@ -220,7 +220,7 @@ with tab2:
             format="%g",
         )
 
-        if st.button("Apply next round"):
+        if st.button("Apply funding round"):
             clean_round_name = round_name.strip() or round_type
 
             round_row = pd.DataFrame(
