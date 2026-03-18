@@ -368,6 +368,31 @@ def apply_common_equity_change():
     st.session_state.common_change_new_holder = ""
 
 
+def clear_all_app_data():
+    st.session_state.cap_table = empty_cap_table()
+    st.session_state.round_history = empty_round_history()
+    st.session_state.financing_details = empty_financing_details()
+
+    reset_values = {
+        "new_holder": "",
+        "new_shares": "0",
+        "new_issue_date": date.today(),
+        "option_pool_shares": "0",
+        "option_pool_issue_date": date.today(),
+        "common_change_type": "Increase existing holder",
+        "common_change_holder": "",
+        "common_change_new_holder": "",
+        "common_change_shares": "0",
+        "common_change_issue_date": date.today(),
+        "option_grant_holder": "",
+        "option_grant_shares": "0",
+        "option_grant_issue_date": date.today(),
+    }
+
+    for key, value in reset_values.items():
+        st.session_state[key] = value
+
+
 def set_option_pool():
     pool_shares = parse_numeric(st.session_state.get("option_pool_shares", "0"))
     issue_date = st.session_state.get("option_pool_issue_date", date.today())
@@ -843,18 +868,19 @@ with tab1:
     st.caption("Use dated common equity and option issuances so the cap table itself shows when ownership changed.")
 
     st.markdown("### Add starting common holder")
-    col1, col2, col3 = st.columns(3)
-    col1.text_input("Holder name", key="new_holder")
-    col2.text_input(
-        "Common shares",
-        value=st.session_state.get("new_shares", "0"),
-        key="new_shares",
-        help="You can type values with commas, like 1,250,000.",
-        on_change=add_starting_row,
-    )
-    col3.date_input("Issue date", key="new_issue_date")
+    with st.form("add_starting_common_holder_form"):
+        col1, col2, col3 = st.columns(3)
+        col1.text_input("Holder name", key="new_holder")
+        col2.text_input(
+            "Common shares",
+            value=st.session_state.get("new_shares", "0"),
+            key="new_shares",
+            help="You can type values with commas, like 1,250,000.",
+        )
+        col3.date_input("Issue date", key="new_issue_date")
+        add_common_submitted = st.form_submit_button("Add common holder")
 
-    if st.button("Add common holder"):
+    if add_common_submitted:
         add_starting_row()
         st.rerun()
 
@@ -1002,15 +1028,7 @@ with tab1:
         display_df["ownership_pct"] = display_df["ownership_pct"].map(lambda x: f"{x:.2%}")
         st.dataframe(display_df, use_container_width=True)
 
-    if st.button("Clear all data"):
-        st.session_state.cap_table = empty_cap_table()
-        st.session_state.round_history = empty_round_history()
-        st.session_state.financing_details = empty_financing_details()
-        st.session_state.new_holder = ""
-        st.session_state.new_shares = "0"
-        st.session_state.option_pool_shares = "0"
-        st.session_state.option_grant_shares = "0"
-        st.rerun()
+    st.button("Clear all data", on_click=clear_all_app_data)
 
 with tab2:
     st.subheader("Add funding round")
