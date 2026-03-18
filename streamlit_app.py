@@ -23,6 +23,10 @@ ROUND_COLUMNS = [
     "liq_pref_multiple",
     "participating",
     "participation_cap_multiple",
+    "price_per_share_override",
+    "minimum_financing_amount",
+    "option_pool_timing",
+    "pre_money_fd_shares_override",
 ]
 
 FINANCING_COLUMNS = [
@@ -38,10 +42,22 @@ FINANCING_COLUMNS = [
     "interest_rate_pct",
     "issue_date",
     "maturity_date",
+    "safe_type",
+    "capitalization_basis",
+    "interest_method",
+    "interest_compounding_frequency",
+    "converts_accrued_interest",
+    "conversion_trigger",
+    "minimum_financing_amount",
+    "shadow_preferred",
     "converted_in_round",
     "converted_on_date",
     "conversion_amount",
     "conversion_price",
+    "conversion_price_source",
+    "cap_price",
+    "discount_price",
+    "round_price_at_conversion",
     "shares_issued",
 ]
 
@@ -194,6 +210,33 @@ def simple_interest(principal, annual_rate_pct, start_date, end_date):
     return float(principal) * (float(annual_rate_pct) / 100.0) * (days / 365.0)
 
 
+def compute_note_accrued_interest(principal, annual_rate_pct, start_date, end_date, interest_method, compounding_frequency):
+    principal = parse_numeric(principal)
+    annual_rate_pct = parse_numeric(annual_rate_pct)
+    if principal <= 0 or annual_rate_pct <= 0:
+        return 0.0
+
+    days = days_between(start_date, end_date)
+    years = days / 365.0
+    rate = annual_rate_pct / 100.0
+    method = (interest_method or "simple").strip().lower()
+    frequency = (compounding_frequency or "annual").strip().lower()
+
+    if method != "compound":
+        return principal * rate * years
+
+    periods_map = {
+        "annual": 1,
+        "semi_annual": 2,
+        "quarterly": 4,
+        "monthly": 12,
+        "daily": 365,
+    }
+    periods = periods_map.get(frequency, 1)
+    amount = principal * ((1 + rate / periods) ** (periods * years))
+    return max(amount - principal, 0.0)
+
+
 def outstanding_convertibles(financing_df: pd.DataFrame) -> pd.DataFrame:
     if financing_df.empty:
         return financing_df.copy()
@@ -203,12 +246,37 @@ def outstanding_convertibles(financing_df: pd.DataFrame) -> pd.DataFrame:
     return out.loc[mask].copy()
 
 
+def capitalization_shares_by_basis(cap_table: pd.DataFrame, basis: str) -> float:
+    cap = cap_table.copy()
+    if cap.empty:
+        return 0.0
+
+    cap["shares"] = pd.to_numeric(cap["shares"], errors="coerce").fillna(0.0)
+    basis = (basis or "company_cap_table_fd").strip()
+
+    if basis == "outstanding_only":
+        mask = cap["security_type"].isin(["Common", "Preferred", "Option"])
+    elif basis == "exclude_option_pool_reserve":
+        mask = cap["security_type"].isin(["Common", "Preferred", "Option"])
+    else:
+        mask = cap["security_type"].isin(["Common", "Preferred", "Option", "Option Pool"])
+
+    filtered = cap.loc[mask].copy()
+    if basis == "exclude_option_pool_reserve":
+        filtered = filtered[filtered["security_type"] != "Option Pool"].copy()
+
+    return float(filtered["shares"].sum())
+
+
 def build_conversion_rows(
     financing_df: pd.DataFrame,
+    cap_table_for_conversion: pd.DataFrame,
     equity_round_name: str,
     equity_round_date,
     round_price: float,
     pre_round_fd_shares: float,
+    total_new_money: float = 0.0,
+    minimum_financing_amount: float = 0.0,
 ):
     outstanding = outstanding_convertibles(financing_df)
     if outstanding.empty:
@@ -221,51 +289,78 @@ def build_conversion_rows(
     for idx, row in outstanding.iterrows():
         instrument_type = row.get("instrument_type")
         investor_name = row.get("investor_name")
-
         valuation_cap = pd.to_numeric(row.get("valuation_cap"), errors="coerce")
         discount_pct = pd.to_numeric(row.get("discount_pct"), errors="coerce")
         interest_rate_pct = pd.to_numeric(row.get("interest_rate_pct"), errors="coerce")
+        capitalization_basis = row.get("capitalization_basis") or "company_cap_table_fd"
+        converts_accrued_interest = row.get("converts_accrued_interest")
+        conversion_trigger = row.get("conversion_trigger") or "qualified_financing"
+        instrument_min_financing = parse_numeric(row.get("minimum_financing_amount"))
+        shadow_preferred = bool(row.get("shadow_preferred"))
+
+        effective_min_financing = max(parse_numeric(minimum_financing_amount), instrument_min_financing)
+        round_qualified = True if effective_min_financing <= 0 else parse_numeric(total_new_money) >= effective_min_financing
+        if conversion_trigger == "qualified_financing" and not round_qualified:
+            continue
 
         if instrument_type == "SAFE":
             base_amount = pd.to_numeric(row.get("amount_invested"), errors="coerce")
             accrued_interest = 0.0
         else:
             principal = pd.to_numeric(row.get("principal_invested"), errors="coerce")
-            accrued_interest = simple_interest(
+            accrued_interest = compute_note_accrued_interest(
                 principal,
                 interest_rate_pct,
                 row.get("issue_date"),
                 equity_round_date,
+                row.get("interest_method"),
+                row.get("interest_compounding_frequency"),
             )
-            base_amount = (0.0 if pd.isna(principal) else float(principal)) + accrued_interest
+            if pd.isna(converts_accrued_interest):
+                converts_accrued_interest = True
+            base_amount = (0.0 if pd.isna(principal) else float(principal)) + (accrued_interest if bool(converts_accrued_interest) else 0.0)
 
         if pd.isna(base_amount) or base_amount <= 0:
             continue
 
-        candidate_prices = []
+        cap_basis_shares = capitalization_shares_by_basis(cap_table_for_conversion, capitalization_basis)
+        if pre_round_fd_shares > 0 and capitalization_basis == "company_cap_table_fd":
+            cap_basis_shares = pre_round_fd_shares
 
-        if pd.notna(valuation_cap) and valuation_cap > 0 and pre_round_fd_shares > 0:
-            cap_price = float(valuation_cap) / float(pre_round_fd_shares)
+        candidate_prices = []
+        price_labels = []
+
+        if pd.notna(valuation_cap) and valuation_cap > 0 and cap_basis_shares > 0:
+            cap_price = float(valuation_cap) / float(cap_basis_shares)
             candidate_prices.append(cap_price)
+            price_labels.append((cap_price, "cap_price"))
         else:
             cap_price = None
 
         if pd.notna(discount_pct) and discount_pct > 0:
             discount_price = round_price * (1.0 - float(discount_pct) / 100.0)
             candidate_prices.append(discount_price)
+            price_labels.append((discount_price, "discount_price"))
         else:
             discount_price = None
 
         candidate_prices.append(round_price)
-        conversion_price = min([p for p in candidate_prices if p is not None and p > 0])
+        price_labels.append((round_price, "round_price"))
 
+        valid_prices = [p for p in candidate_prices if p is not None and p > 0]
+        if not valid_prices:
+            continue
+
+        conversion_price = min(valid_prices)
+        conversion_price_source = next((label for price, label in price_labels if abs(price - conversion_price) < 1e-12), "round_price")
         shares_issued = float(base_amount) / float(conversion_price)
+        issued_class = f"{equity_round_name} Shadow" if shadow_preferred else equity_round_name
 
         cap_rows.append(
             {
                 "holder": investor_name,
                 "security_type": "Preferred",
-                "class": equity_round_name,
+                "class": issued_class,
                 "shares": shares_issued,
                 "issue_date": date_to_str(equity_round_date),
             }
@@ -276,6 +371,10 @@ def build_conversion_rows(
         updated_financing.at[idx, "converted_on_date"] = date_to_str(equity_round_date)
         updated_financing.at[idx, "conversion_amount"] = float(base_amount)
         updated_financing.at[idx, "conversion_price"] = float(conversion_price)
+        updated_financing.at[idx, "conversion_price_source"] = conversion_price_source
+        updated_financing.at[idx, "cap_price"] = cap_price
+        updated_financing.at[idx, "discount_price"] = discount_price
+        updated_financing.at[idx, "round_price_at_conversion"] = float(round_price)
         updated_financing.at[idx, "shares_issued"] = float(shares_issued)
 
         conversion_summary_rows.append(
@@ -283,13 +382,20 @@ def build_conversion_rows(
                 "investor_name": investor_name,
                 "instrument_type": instrument_type,
                 "converted_in_round": equity_round_name,
+                "capitalization_basis": capitalization_basis,
+                "conversion_trigger": conversion_trigger,
+                "minimum_financing_amount": float(effective_min_financing),
                 "conversion_amount": float(base_amount),
                 "accrued_interest": float(accrued_interest),
+                "cap_basis_shares": float(cap_basis_shares),
                 "cap_price": cap_price,
                 "discount_price": discount_price,
                 "round_price": float(round_price),
                 "conversion_price": float(conversion_price),
+                "conversion_price_source": conversion_price_source,
                 "shares_issued": float(shares_issued),
+                "shadow_preferred": shadow_preferred,
+                "issued_class": issued_class,
             }
         )
 
@@ -1013,9 +1119,12 @@ with tab1:
             )
             updated_cap = pd.concat([updated_cap, option_row], ignore_index=True)
             st.session_state.cap_table = updated_cap
-            st.session_state.option_pool_shares = format_number_for_input(remaining_pool)
-            st.session_state.option_pool_issue_date = option_issue_date
-            st.session_state.option_grant_shares = "0"
+            st.session_state["_pending_widget_state_updates"] = {
+                **st.session_state.get("_pending_widget_state_updates", {}),
+                "option_pool_shares": format_number_for_input(remaining_pool),
+                "option_pool_issue_date": option_issue_date,
+                "option_grant_shares": "0",
+            }
             st.rerun()
 
     if "_option_grant_error" in st.session_state:
@@ -1064,6 +1173,18 @@ with tab2:
         liq_pref_multiple = None
         participating = None
         participation_cap_multiple = None
+
+        price_per_share_override = 0.0
+        minimum_financing_amount = 0.0
+        option_pool_timing = None
+        pre_money_fd_shares_override = 0.0
+        safe_type = None
+        capitalization_basis = None
+        interest_method = None
+        interest_compounding_frequency = None
+        converts_accrued_interest = None
+        conversion_trigger = None
+        shadow_preferred = False
 
         if round_type == "Equity":
             pre_money_valuation = parse_numeric(
@@ -1115,7 +1236,7 @@ with tab2:
                     value=st.session_state.get("safe_discount_pct", "0"),
                 )
             )
-            issue_date = st.date_input("SAFE issue date", value=round_date, key="safe_issue_date")
+            issue_date = round_date
 
         else:
             valuation_cap = parse_numeric(
@@ -1139,8 +1260,99 @@ with tab2:
                     value=st.session_state.get("note_interest_rate_pct", "0"),
                 )
             )
-            issue_date = st.date_input("Note issue date", value=round_date, key="note_issue_date")
+            issue_date = round_date
             maturity_date = st.date_input("Maturity date", value=round_date, key="note_maturity_date")
+
+        st.markdown("### Instrument / round terms")
+        st.caption("The round date is the financing date used for this round. Separate SAFE and note issue-date entry has been removed.")
+        if round_type == "Equity":
+            e1, e2, e3 = st.columns(3)
+            price_per_share_override = parse_numeric(
+                e1.text_input(
+                    "Price per share override ($)",
+                    value=st.session_state.get("equity_price_per_share_override", "0"),
+                    key="equity_price_per_share_override",
+                    help="Optional. Leave 0 to derive from pre-money valuation and FD shares.",
+                )
+            )
+            minimum_financing_amount = parse_numeric(
+                e2.text_input(
+                    "Qualified financing threshold ($)",
+                    value=st.session_state.get("equity_minimum_financing_amount", "0"),
+                    key="equity_minimum_financing_amount",
+                )
+            )
+            option_pool_timing = e3.selectbox(
+                "Option pool timing",
+                ["pre_money", "post_money"],
+                key="equity_option_pool_timing",
+            )
+            pre_money_fd_shares_override = parse_numeric(
+                st.text_input(
+                    "Pre-money fully diluted shares override",
+                    value=st.session_state.get("equity_pre_money_fd_shares_override", "0"),
+                    key="equity_pre_money_fd_shares_override",
+                    help="Optional. Leave 0 to use current cap table fully diluted shares.",
+                )
+            )
+        elif round_type == "SAFE":
+            s1, s2, s3 = st.columns(3)
+            safe_type = "post_money_safe"
+            s1.markdown("**SAFE type:** Post-money SAFE")
+            capitalization_basis = s2.selectbox(
+                "Capitalization basis",
+                ["company_cap_table_fd", "exclude_option_pool_reserve", "outstanding_only"],
+                key="safe_capitalization_basis",
+            )
+            shadow_preferred = s3.checkbox("Shadow preferred", key="safe_shadow_preferred", value=False)
+            minimum_financing_amount = parse_numeric(
+                st.text_input(
+                    "Qualified financing threshold ($)",
+                    value=st.session_state.get("safe_minimum_financing_amount", "0"),
+                    key="safe_minimum_financing_amount",
+                )
+            )
+            conversion_trigger = st.selectbox(
+                "Conversion trigger",
+                ["qualified_financing", "priced_round"],
+                key="safe_conversion_trigger",
+            )
+        else:
+            n1, n2, n3 = st.columns(3)
+            capitalization_basis = n1.selectbox(
+                "Capitalization basis",
+                ["company_cap_table_fd", "exclude_option_pool_reserve", "outstanding_only"],
+                key="note_capitalization_basis",
+            )
+            interest_method = n2.selectbox(
+                "Interest method",
+                ["simple", "compound"],
+                key="note_interest_method",
+            )
+            interest_compounding_frequency = n3.selectbox(
+                "Compounding frequency",
+                ["annual", "semi_annual", "quarterly", "monthly", "daily"],
+                key="note_interest_compounding_frequency",
+            )
+            converts_accrued_interest = st.checkbox(
+                "Convert accrued interest",
+                key="note_converts_accrued_interest",
+                value=True,
+            )
+            n4, n5 = st.columns(2)
+            minimum_financing_amount = parse_numeric(
+                n4.text_input(
+                    "Qualified financing threshold ($)",
+                    value=st.session_state.get("note_minimum_financing_amount", "0"),
+                    key="note_minimum_financing_amount",
+                )
+            )
+            conversion_trigger = n5.selectbox(
+                "Conversion trigger",
+                ["qualified_financing", "priced_round"],
+                key="note_conversion_trigger",
+            )
+            shadow_preferred = st.checkbox("Shadow preferred", key="note_shadow_preferred", value=False)
 
         st.markdown("### Investor entries")
         investor_count = st.number_input(
@@ -1174,21 +1386,23 @@ with tab2:
             outstanding = outstanding_convertibles(st.session_state.financing_details)
             if not outstanding.empty:
                 st.markdown("### Outstanding SAFE / Note instruments that will be evaluated for auto-conversion")
-                outstanding_show = outstanding[
-                    [
-                        "instrument_type",
-                        "investor_name",
-                        "amount_invested",
-                        "principal_invested",
-                        "valuation_cap",
-                        "discount_pct",
-                        "interest_rate_pct",
-                        "issue_date",
-                    ]
-                ].copy()
+                outstanding_cols = [
+                    "instrument_type",
+                    "investor_name",
+                    "amount_invested",
+                    "principal_invested",
+                    "valuation_cap",
+                    "discount_pct",
+                    "interest_rate_pct",
+                    "capitalization_basis",
+                    "conversion_trigger",
+                    "minimum_financing_amount",
+                    "issue_date",
+                ]
+                outstanding_show = outstanding[[c for c in outstanding_cols if c in outstanding.columns]].copy()
                 outstanding_show = format_money_columns(
                     outstanding_show,
-                    ["amount_invested", "principal_invested", "valuation_cap"],
+                    ["amount_invested", "principal_invested", "valuation_cap", "minimum_financing_amount"],
                 )
                 st.dataframe(outstanding_show, use_container_width=True)
 
@@ -1206,6 +1420,8 @@ with tab2:
 
             if round_type == "Equity":
                 pre_round_shares = pd.to_numeric(updated_cap_table["shares"], errors="coerce").fillna(0.0).sum()
+                if pre_money_fd_shares_override > 0:
+                    pre_round_shares = pre_money_fd_shares_override
                 if pre_round_shares <= 0:
                     errors.append("Need at least one existing share before applying an equity round.")
 
@@ -1228,6 +1444,10 @@ with tab2:
                         "liq_pref_multiple": liq_pref_multiple,
                         "participating": participating,
                         "participation_cap_multiple": participation_cap_multiple,
+                        "price_per_share_override": price_per_share_override if round_type == "Equity" else None,
+                        "minimum_financing_amount": minimum_financing_amount,
+                        "option_pool_timing": option_pool_timing if round_type == "Equity" else None,
+                        "pre_money_fd_shares_override": pre_money_fd_shares_override if round_type == "Equity" else None,
                     }]
                 )
                 st.session_state.round_history = pd.concat(
@@ -1235,7 +1455,7 @@ with tab2:
                 )
 
                 if round_type == "Equity":
-                    round_price = float(pre_money_valuation) / float(pre_round_shares)
+                    round_price = float(price_per_share_override) if price_per_share_override > 0 else float(pre_money_valuation) / float(pre_round_shares)
 
                     preferred_rows = []
                     for inv in valid_investors:
@@ -1252,10 +1472,13 @@ with tab2:
 
                     convertible_rows, financing_updated, conversion_summary = build_conversion_rows(
                         st.session_state.financing_details,
+                        updated_cap_table,
                         clean_round_name,
                         round_date,
                         round_price,
                         pre_round_shares,
+                        total_new_money=sum(inv["amount"] for inv in valid_investors),
+                        minimum_financing_amount=minimum_financing_amount,
                     )
 
                     if preferred_rows:
@@ -1289,10 +1512,22 @@ with tab2:
                                 "interest_rate_pct": None,
                                 "issue_date": date_to_str(round_date),
                                 "maturity_date": None,
+                                "safe_type": None,
+                                "capitalization_basis": None,
+                                "interest_method": None,
+                                "interest_compounding_frequency": None,
+                                "converts_accrued_interest": None,
+                                "conversion_trigger": None,
+                                "minimum_financing_amount": None,
+                                "shadow_preferred": None,
                                 "converted_in_round": None,
                                 "converted_on_date": None,
                                 "conversion_amount": None,
                                 "conversion_price": round_price,
+                                "conversion_price_source": "round_price",
+                                "cap_price": None,
+                                "discount_price": None,
+                                "round_price_at_conversion": round_price,
                                 "shares_issued": float(inv["amount"]) / float(round_price),
                             }
                         )
@@ -1308,19 +1543,21 @@ with tab2:
                     if not conversion_summary.empty:
                         st.write("### Converted SAFE / Note instruments")
                         show_conv = conversion_summary.copy()
-                        for col in [
+                        money_cols = [
+                            "minimum_financing_amount",
                             "conversion_amount",
                             "accrued_interest",
                             "cap_price",
                             "discount_price",
                             "round_price",
                             "conversion_price",
-                        ]:
+                        ]
+                        for col in money_cols:
                             if col in show_conv.columns:
                                 show_conv[col] = show_conv[col].apply(
                                     lambda x: f"${x:,.4f}" if pd.notnull(x) else ""
                                 )
-                        show_conv = format_share_columns(show_conv, ["shares_issued"])
+                        show_conv = format_share_columns(show_conv, ["cap_basis_shares", "shares_issued"])
                         st.dataframe(show_conv, use_container_width=True)
 
                 elif round_type == "SAFE":
@@ -1340,10 +1577,22 @@ with tab2:
                                 "interest_rate_pct": None,
                                 "issue_date": date_to_str(issue_date),
                                 "maturity_date": None,
+                                "safe_type": safe_type,
+                                "capitalization_basis": capitalization_basis,
+                                "interest_method": None,
+                                "interest_compounding_frequency": None,
+                                "converts_accrued_interest": None,
+                                "conversion_trigger": conversion_trigger,
+                                "minimum_financing_amount": minimum_financing_amount,
+                                "shadow_preferred": shadow_preferred,
                                 "converted_in_round": None,
                                 "converted_on_date": None,
                                 "conversion_amount": None,
                                 "conversion_price": None,
+                                "conversion_price_source": None,
+                                "cap_price": None,
+                                "discount_price": None,
+                                "round_price_at_conversion": None,
                                 "shares_issued": None,
                             }
                         )
@@ -1373,10 +1622,22 @@ with tab2:
                                 "interest_rate_pct": interest_rate_pct,
                                 "issue_date": date_to_str(issue_date),
                                 "maturity_date": date_to_str(maturity_date),
+                                "safe_type": None,
+                                "capitalization_basis": capitalization_basis,
+                                "interest_method": interest_method,
+                                "interest_compounding_frequency": interest_compounding_frequency,
+                                "converts_accrued_interest": converts_accrued_interest,
+                                "conversion_trigger": conversion_trigger,
+                                "minimum_financing_amount": minimum_financing_amount,
+                                "shadow_preferred": shadow_preferred,
                                 "converted_in_round": None,
                                 "converted_on_date": None,
                                 "conversion_amount": None,
                                 "conversion_price": None,
+                                "conversion_price_source": None,
+                                "cap_price": None,
+                                "discount_price": None,
+                                "round_price_at_conversion": None,
                                 "shares_issued": None,
                             }
                         )
@@ -1407,7 +1668,7 @@ with tab3:
         history_show = st.session_state.round_history.copy()
         history_show = format_money_columns(
             history_show,
-            ["pre_money_valuation", "amount_raised", "valuation_cap"],
+            ["pre_money_valuation", "amount_raised", "valuation_cap", "price_per_share_override", "minimum_financing_amount"],
         )
         st.dataframe(history_show, use_container_width=True)
 
@@ -1422,8 +1683,12 @@ with tab3:
                 "amount_invested",
                 "principal_invested",
                 "valuation_cap",
+                "minimum_financing_amount",
                 "conversion_amount",
+                "cap_price",
+                "discount_price",
                 "conversion_price",
+                "round_price_at_conversion",
             ],
         )
         details_show = format_share_columns(details_show, ["shares_issued"])
