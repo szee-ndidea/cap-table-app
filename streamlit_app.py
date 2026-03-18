@@ -367,6 +367,14 @@ def apply_common_equity_change():
     st.session_state.common_change_new_holder = ""
 
 
+def apply_pending_widget_resets():
+    pending = st.session_state.get("_pending_widget_state_updates", {})
+    if pending:
+        for key, value in pending.items():
+            st.session_state[key] = value
+        st.session_state["_pending_widget_state_updates"] = {}
+
+
 def clear_all_app_data():
     st.session_state.cap_table = empty_cap_table()
     st.session_state.round_history = empty_round_history()
@@ -851,6 +859,8 @@ def format_share_columns(df: pd.DataFrame, columns: list[str], decimals: int = 0
             )
     return out
 
+
+apply_pending_widget_resets()
 
 tab1, tab2, tab3, tab4, tab5 = st.tabs(
     [
@@ -1584,8 +1594,9 @@ with tab5:
                 st.session_state.cap_table = normalize_cap_table(cap_df)
 
                 pool_mask = st.session_state.cap_table["holder"] == "Option Pool Reserve"
+                pending_updates = st.session_state.get("_pending_widget_state_updates", {})
                 if pool_mask.any():
-                    st.session_state.option_pool_shares = format_number_for_input(
+                    pending_updates["option_pool_shares"] = format_number_for_input(
                         pd.to_numeric(
                             st.session_state.cap_table.loc[pool_mask, "shares"],
                             errors="coerce"
@@ -1593,9 +1604,11 @@ with tab5:
                     )
                     pool_dates = st.session_state.cap_table.loc[pool_mask, "issue_date"].dropna().astype(str)
                     if not pool_dates.empty:
-                        st.session_state.option_pool_issue_date = str_to_date(pool_dates.iloc[-1]) or date.today()
+                        pending_updates["option_pool_issue_date"] = str_to_date(pool_dates.iloc[-1]) or date.today()
                 else:
-                    st.session_state.option_pool_shares = "0"
+                    pending_updates["option_pool_shares"] = "0"
+                    pending_updates["option_pool_issue_date"] = date.today()
+                st.session_state["_pending_widget_state_updates"] = pending_updates
 
             if uploaded_rounds is not None:
                 round_df = pd.read_csv(uploaded_rounds)
