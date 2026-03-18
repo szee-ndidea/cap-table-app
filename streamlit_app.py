@@ -54,6 +54,15 @@ if "round_history" not in st.session_state:
 if "financing_details" not in st.session_state:
     st.session_state.financing_details = pd.DataFrame(columns=FINANCING_COLUMNS)
 
+if "new_holder" not in st.session_state:
+    st.session_state.new_holder = ""
+
+if "new_security_type" not in st.session_state:
+    st.session_state.new_security_type = "Common"
+
+if "new_shares" not in st.session_state:
+    st.session_state.new_shares = 0.0
+
 
 def empty_cap_table():
     return pd.DataFrame(columns=CAP_COLUMNS)
@@ -111,35 +120,6 @@ def normalize_financing_details(df: pd.DataFrame) -> pd.DataFrame:
             out[c] = None
     out = out[FINANCING_COLUMNS].copy()
     return out
-
-
-def parse_exit_values(text: str):
-    values = []
-    for part in text.split(","):
-        cleaned = part.strip().replace("$", "").replace(",", "")
-        if cleaned == "":
-            continue
-        try:
-            val = float(cleaned)
-            if val >= 0:
-                values.append(val)
-        except ValueError:
-            pass
-    return values
-
-
-def build_exit_sensitivity_table(cap_table: pd.DataFrame, exit_values: list[float]) -> pd.DataFrame:
-    current = recalc_ownership(cap_table)
-    if current.empty or not exit_values:
-        return pd.DataFrame()
-
-    result = current[["holder", "security_type", "class", "shares", "ownership_pct"]].copy()
-
-    for exit_value in exit_values:
-        col_name = f"${exit_value:,.0f}"
-        result[col_name] = result["ownership_pct"] * exit_value
-
-    return result
 
 
 def date_to_str(d):
@@ -280,6 +260,57 @@ def build_conversion_rows(
     return cap_rows, updated_financing, summary_df
 
 
+def add_starting_row():
+    holder = st.session_state.get("new_holder", "").strip()
+    security_type = st.session_state.get("new_security_type", "Common")
+    shares = st.session_state.get("new_shares", 0.0)
+
+    if holder and shares > 0:
+        class_name = "Common" if security_type == "Common" else "Option Pool"
+        new_row = pd.DataFrame(
+            [{
+                "holder": holder,
+                "security_type": security_type,
+                "class": class_name,
+                "shares": shares,
+            }]
+        )
+        st.session_state.cap_table = pd.concat(
+            [st.session_state.cap_table, new_row], ignore_index=True
+        )
+        st.session_state.new_holder = ""
+        st.session_state.new_security_type = "Common"
+        st.session_state.new_shares = 0.0
+    else:
+        st.session_state["_add_row_error"] = "Enter a holder name and shares greater than 0."
+
+
+def build_exit_scenarios(low_value: float, high_value: float, num_points: int = 8):
+    if low_value < 0 or high_value < 0:
+        return []
+    if high_value < low_value:
+        return []
+    if low_value == high_value:
+        return [float(low_value)]
+
+    step = (high_value - low_value) / (num_points - 1)
+    return [low_value + i * step for i in range(num_points)]
+
+
+def build_exit_sensitivity_table(cap_table: pd.DataFrame, exit_values: list[float]) -> pd.DataFrame:
+    current = recalc_ownership(cap_table)
+    if current.empty or not exit_values:
+        return pd.DataFrame()
+
+    result = current[["holder", "security_type", "class", "shares", "ownership_pct"]].copy()
+
+    for exit_value in exit_values:
+        col_name = f"${exit_value:,.0f}"
+        result[col_name] = result["ownership_pct"] * exit_value
+
+    return result
+
+
 tab1, tab2, tab3, tab4, tab5 = st.tabs(
     [
         "Starting Cap Table",
@@ -293,30 +324,26 @@ tab1, tab2, tab3, tab4, tab5 = st.tabs(
 with tab1:
     st.subheader("Build starting cap table")
 
-    with st.form("add_holder_form", clear_on_submit=True):
-        col1, col2, col3, col4 = st.columns(4)
-        holder = col1.text_input("Holder name")
-        security_type = col2.selectbox("Security type", ["Common", "Preferred", "Option Pool"])
-        class_name = col3.text_input("Class", value="Common")
-        shares = col4.number_input("Shares", min_value=0.0, value=0.0, step=1.0, format="%g")
-        submitted = st.form_submit_button("Add row")
+    col1, col2, col3 = st.columns(3)
+    col1.text_input("Holder name", key="new_holder")
+    col2.selectbox("Security type", ["Common", "Option Pool"], key="new_security_type")
+    col3.number_input(
+        "Shares",
+        min_value=0.0,
+        value=0.0,
+        step=1.0,
+        format="%g",
+        key="new_shares",
+        on_change=add_starting_row,
+    )
 
-        if submitted:
-            if holder.strip() and shares > 0:
-                new_row = pd.DataFrame(
-                    [{
-                        "holder": holder.strip(),
-                        "security_type": security_type,
-                        "class": class_name.strip() if class_name.strip() else security_type,
-                        "shares": shares,
-                    }]
-                )
-                st.session_state.cap_table = pd.concat(
-                    [st.session_state.cap_table, new_row], ignore_index=True
-                )
-                st.success("Row added.")
-            else:
-                st.error("Enter a holder name and shares greater than 0.")
+    if st.button("Add row"):
+        add_starting_row()
+        st.rerun()
+
+    if "_add_row_error" in st.session_state:
+        st.error(st.session_state["_add_row_error"])
+        del st.session_state["_add_row_error"]
 
     if not st.session_state.cap_table.empty:
         st.write("Current starting table")
@@ -328,6 +355,9 @@ with tab1:
         st.session_state.cap_table = empty_cap_table()
         st.session_state.round_history = empty_round_history()
         st.session_state.financing_details = empty_financing_details()
+        st.session_state.new_holder = ""
+        st.session_state.new_security_type = "Common"
+        st.session_state.new_shares = 0.0
         st.rerun()
 
 with tab2:
@@ -746,17 +776,27 @@ with tab4:
     if current.empty:
         st.info("Add a cap table first before running exit analysis.")
     else:
-        exit_values_text = st.text_area(
-            "Enter exit values separated by commas ($)",
-            value="10000000, 50000000, 100000000, 150000000, 200000000",
-            help="Example: 10000000, 50000000, 100000000",
+        col1, col2 = st.columns(2)
+        low_exit = col1.number_input(
+            "Low exit value ($)",
+            min_value=0.0,
+            value=10000000.0,
+            step=1000000.0,
+            format="%g",
+        )
+        high_exit = col2.number_input(
+            "High exit value ($)",
+            min_value=0.0,
+            value=200000000.0,
+            step=1000000.0,
+            format="%g",
         )
 
-        exit_values = parse_exit_values(exit_values_text)
-
         if st.button("Run exit sensitivity"):
+            exit_values = build_exit_scenarios(low_exit, high_exit, num_points=8)
+
             if not exit_values:
-                st.error("Please enter at least one valid exit value.")
+                st.error("Please enter a valid low and high exit value.")
             else:
                 sensitivity_df = build_exit_sensitivity_table(current, exit_values)
 
@@ -767,6 +807,8 @@ with tab4:
                 for col in dollar_cols:
                     display_df[col] = display_df[col].map(lambda x: f"${x:,.2f}")
 
+                scenario_labels = [f"${v:,.0f}" for v in exit_values]
+                st.write(f"Scenarios used: {', '.join(scenario_labels)}")
                 st.write("### Exit proceeds by holder")
                 st.dataframe(display_df, use_container_width=True)
 
