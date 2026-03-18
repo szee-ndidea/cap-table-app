@@ -315,8 +315,7 @@ def add_starting_row():
         st.session_state.cap_table = pd.concat(
             [st.session_state.cap_table, new_row], ignore_index=True
         )
-        st.session_state.new_holder = ""
-        st.session_state.new_shares = "0"
+        st.session_state["_reset_new_common_form"] = True
     else:
         st.session_state["_add_row_error"] = "Enter a holder name and shares greater than 0."
 
@@ -868,6 +867,12 @@ with tab1:
     st.caption("Use dated common equity and option issuances so the cap table itself shows when ownership changed.")
 
     st.markdown("### Add starting common holder")
+    if st.session_state.get("_reset_new_common_form"):
+        st.session_state["new_holder"] = ""
+        st.session_state["new_shares"] = "0"
+        st.session_state["new_issue_date"] = date.today()
+        st.session_state["_reset_new_common_form"] = False
+
     with st.form("add_starting_common_holder_form"):
         col1, col2, col3 = st.columns(3)
         col1.text_input("Holder name", key="new_holder")
