@@ -57,11 +57,11 @@ if "financing_details" not in st.session_state:
 if "new_holder" not in st.session_state:
     st.session_state.new_holder = ""
 
-if "new_security_type" not in st.session_state:
-    st.session_state.new_security_type = "Common"
-
 if "new_shares" not in st.session_state:
     st.session_state.new_shares = 0.0
+
+if "option_pool_shares" not in st.session_state:
+    st.session_state.option_pool_shares = 0.0
 
 
 def empty_cap_table():
@@ -262,16 +262,14 @@ def build_conversion_rows(
 
 def add_starting_row():
     holder = st.session_state.get("new_holder", "").strip()
-    security_type = st.session_state.get("new_security_type", "Common")
     shares = st.session_state.get("new_shares", 0.0)
 
     if holder and shares > 0:
-        class_name = "Common" if security_type == "Common" else "Option Pool"
         new_row = pd.DataFrame(
             [{
                 "holder": holder,
-                "security_type": security_type,
-                "class": class_name,
+                "security_type": "Common",
+                "class": "Common",
                 "shares": shares,
             }]
         )
@@ -279,10 +277,29 @@ def add_starting_row():
             [st.session_state.cap_table, new_row], ignore_index=True
         )
         st.session_state.new_holder = ""
-        st.session_state.new_security_type = "Common"
         st.session_state.new_shares = 0.0
     else:
         st.session_state["_add_row_error"] = "Enter a holder name and shares greater than 0."
+
+
+def set_option_pool():
+    pool_shares = st.session_state.get("option_pool_shares", 0.0)
+
+    cap = st.session_state.cap_table.copy()
+    cap = cap[cap["holder"] != "Option Pool Reserve"].copy()
+
+    if pool_shares > 0:
+        pool_row = pd.DataFrame(
+            [{
+                "holder": "Option Pool Reserve",
+                "security_type": "Option Pool",
+                "class": "Option Pool",
+                "shares": pool_shares,
+            }]
+        )
+        cap = pd.concat([cap, pool_row], ignore_index=True)
+
+    st.session_state.cap_table = cap
 
 
 def build_exit_scenarios(low_value: float, high_value: float, num_points: int = 8):
@@ -324,11 +341,11 @@ tab1, tab2, tab3, tab4, tab5 = st.tabs(
 with tab1:
     st.subheader("Build starting cap table")
 
-    col1, col2, col3 = st.columns(3)
+    st.markdown("### Common holders")
+    col1, col2 = st.columns(2)
     col1.text_input("Holder name", key="new_holder")
-    col2.selectbox("Security type", ["Common", "Option Pool"], key="new_security_type")
-    col3.number_input(
-        "Shares",
+    col2.number_input(
+        "Common shares",
         min_value=0.0,
         value=0.0,
         step=1.0,
@@ -337,13 +354,28 @@ with tab1:
         on_change=add_starting_row,
     )
 
-    if st.button("Add row"):
+    if st.button("Add common holder"):
         add_starting_row()
         st.rerun()
 
     if "_add_row_error" in st.session_state:
         st.error(st.session_state["_add_row_error"])
         del st.session_state["_add_row_error"]
+
+    st.markdown("### Option pool reserve")
+    st.number_input(
+        "Option pool reserve shares",
+        min_value=0.0,
+        value=float(st.session_state.get("option_pool_shares", 0.0)),
+        step=1.0,
+        format="%g",
+        key="option_pool_shares",
+        on_change=set_option_pool,
+    )
+
+    if st.button("Update option pool reserve"):
+        set_option_pool()
+        st.rerun()
 
     if not st.session_state.cap_table.empty:
         st.write("Current starting table")
@@ -356,8 +388,8 @@ with tab1:
         st.session_state.round_history = empty_round_history()
         st.session_state.financing_details = empty_financing_details()
         st.session_state.new_holder = ""
-        st.session_state.new_security_type = "Common"
         st.session_state.new_shares = 0.0
+        st.session_state.option_pool_shares = 0.0
         st.rerun()
 
 with tab2:
@@ -544,16 +576,23 @@ with tab2:
                     ignore_index=True,
                 )
 
-            if new_option_pool > 0:
+            existing_pool = updated_cap_table.loc[
+                updated_cap_table["holder"] == "Option Pool Reserve", "shares"
+            ]
+            existing_pool_value = float(existing_pool.iloc[0]) if len(existing_pool) > 0 else 0.0
+
+            updated_cap_table = updated_cap_table[updated_cap_table["holder"] != "Option Pool Reserve"].copy()
+
+            if existing_pool_value + new_option_pool > 0:
                 updated_cap_table = pd.concat(
                     [
                         updated_cap_table,
                         pd.DataFrame(
                             [{
-                                "holder": "Option Pool Increase",
+                                "holder": "Option Pool Reserve",
                                 "security_type": "Option Pool",
                                 "class": "Option Pool",
-                                "shares": new_option_pool,
+                                "shares": existing_pool_value + new_option_pool,
                             }]
                         ),
                     ],
@@ -873,6 +912,17 @@ with tab5:
             if uploaded_cap is not None:
                 cap_df = pd.read_csv(uploaded_cap)
                 st.session_state.cap_table = normalize_cap_table(cap_df)
+
+                pool_mask = st.session_state.cap_table["holder"] == "Option Pool Reserve"
+                if pool_mask.any():
+                    st.session_state.option_pool_shares = float(
+                        pd.to_numeric(
+                            st.session_state.cap_table.loc[pool_mask, "shares"],
+                            errors="coerce"
+                        ).fillna(0.0).sum()
+                    )
+                else:
+                    st.session_state.option_pool_shares = 0.0
 
             if uploaded_rounds is not None:
                 round_df = pd.read_csv(uploaded_rounds)
