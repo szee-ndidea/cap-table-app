@@ -842,12 +842,12 @@ def format_money_columns(df: pd.DataFrame, columns: list[str], decimals: int = 2
     return out
 
 
-def format_share_columns(df: pd.DataFrame, columns: list[str], decimals: int = 2) -> pd.DataFrame:
+def format_share_columns(df: pd.DataFrame, columns: list[str], decimals: int = 0) -> pd.DataFrame:
     out = df.copy()
     for col in columns:
         if col in out.columns:
             out[col] = out[col].apply(
-                lambda x: f"{x:,.{decimals}f}" if pd.notnull(x) and x != "" else ""
+                lambda x: f"{x:,.0f}" if pd.notnull(x) and x != "" else ""
             )
     return out
 
@@ -1182,15 +1182,6 @@ with tab2:
                 )
                 st.dataframe(outstanding_show, use_container_width=True)
 
-        new_option_pool = parse_numeric(
-            text_numeric_input(
-                "Option pool increase",
-                key="funding_round_new_option_pool",
-                value=st.session_state.get("funding_round_new_option_pool", "0"),
-                help_text="You can type values with commas.",
-            )
-        )
-
         if st.button("Apply funding round"):
             clean_round_name, valid_investors, errors = validate_round_inputs(
                 round_type=round_type,
@@ -1203,29 +1194,6 @@ with tab2:
 
             updated_cap_table = st.session_state.cap_table.copy()
 
-            existing_pool = updated_cap_table.loc[
-                updated_cap_table["holder"] == "Option Pool Reserve", "shares"
-            ]
-            existing_pool_value = float(existing_pool.iloc[0]) if len(existing_pool) > 0 else 0.0
-
-            updated_cap_table = updated_cap_table[updated_cap_table["holder"] != "Option Pool Reserve"].copy()
-
-            if existing_pool_value + new_option_pool > 0:
-                updated_cap_table = pd.concat(
-                    [
-                        updated_cap_table,
-                        pd.DataFrame(
-                            [{
-                                "holder": "Option Pool Reserve",
-                                "security_type": "Option Pool",
-                                "class": "Option Pool",
-                                "shares": existing_pool_value + new_option_pool,
-                                "issue_date": date_to_str(round_date),
-                            }]
-                        ),
-                    ],
-                    ignore_index=True,
-                )
 
             if round_type == "Equity":
                 pre_round_shares = pd.to_numeric(updated_cap_table["shares"], errors="coerce").fillna(0.0).sum()
@@ -1343,7 +1311,7 @@ with tab2:
                                 show_conv[col] = show_conv[col].apply(
                                     lambda x: f"${x:,.4f}" if pd.notnull(x) else ""
                                 )
-                        show_conv = format_share_columns(show_conv, ["shares_issued"], decimals=4)
+                        show_conv = format_share_columns(show_conv, ["shares_issued"])
                         st.dataframe(show_conv, use_container_width=True)
 
                 elif round_type == "SAFE":
@@ -1449,7 +1417,7 @@ with tab3:
                 "conversion_price",
             ],
         )
-        details_show = format_share_columns(details_show, ["shares_issued"], decimals=4)
+        details_show = format_share_columns(details_show, ["shares_issued"])
         st.dataframe(details_show, use_container_width=True)
 
 with tab4:
