@@ -553,7 +553,7 @@ def build_waterfall_for_exit(
 
     class_terms = build_preferred_class_terms(cap_table, round_history, financing_details)
 
-    common_rows = eligible[eligible["security_type"] == "Common"].copy()
+    common_rows = eligible[eligible["security_type"].isin(["Common", "Option"])].copy()
     common_shares = common_rows["shares"].sum()
 
     class_summaries = []
@@ -830,7 +830,7 @@ def format_share_columns(df: pd.DataFrame, columns: list[str], decimals: int = 2
 
 tab1, tab2, tab3, tab4, tab5 = st.tabs(
     [
-        "Starting Cap Table",
+        "Common Equity",
         "Funding Round",
         "Current Cap Table",
         "Exit Analysis",
@@ -840,7 +840,7 @@ tab1, tab2, tab3, tab4, tab5 = st.tabs(
 
 with tab1:
     st.subheader("Common Equity Table")
-    st.caption("Use dated common equity entries so the cap table itself shows when ownership changed.")
+    st.caption("Use dated common equity and option issuances so the cap table itself shows when ownership changed.")
 
     st.markdown("### Add starting common holder")
     col1, col2, col3 = st.columns(3)
@@ -902,6 +902,85 @@ with tab1:
         st.error(st.session_state["_common_change_error"])
         del st.session_state["_common_change_error"]
 
+    st.markdown("### Option grants to common holders")
+    option_holders = sorted(
+        st.session_state.cap_table.loc[
+            st.session_state.cap_table["security_type"] == "Common", "holder"
+        ].dropna().astype(str).unique().tolist()
+    )
+
+    o1, o2, o3 = st.columns(3)
+    o1.selectbox(
+        "Common holder receiving options",
+        options=[""] + option_holders,
+        key="option_grant_holder",
+    )
+    o2.text_input(
+        "Options granted",
+        value=st.session_state.get("option_grant_shares", "0"),
+        key="option_grant_shares",
+        help="You can type values with commas.",
+    )
+    o3.date_input("Option grant date", key="option_grant_issue_date", value=date.today())
+
+    if st.button("Issue options"):
+        option_holder = st.session_state.get("option_grant_holder", "")
+        option_shares = parse_numeric(st.session_state.get("option_grant_shares", "0"))
+        option_issue_date = st.session_state.get("option_grant_issue_date", date.today())
+
+        pool_mask = st.session_state.cap_table["holder"] == "Option Pool Reserve"
+        current_pool = 0.0
+        if pool_mask.any():
+            current_pool = pd.to_numeric(
+                st.session_state.cap_table.loc[pool_mask, "shares"],
+                errors="coerce"
+            ).fillna(0.0).sum()
+
+        if not option_holder:
+            st.session_state["_option_grant_error"] = "Select a common holder to receive the option grant."
+        elif option_shares <= 0:
+            st.session_state["_option_grant_error"] = "Enter an option grant amount greater than 0."
+        elif current_pool <= 0:
+            st.session_state["_option_grant_error"] = "There is no option pool reserve available to grant from."
+        elif option_shares > current_pool:
+            st.session_state["_option_grant_error"] = f"Option grant exceeds remaining pool. Available pool: {current_pool:,.0f} shares."
+        else:
+            updated_cap = st.session_state.cap_table.copy()
+            updated_cap = updated_cap[updated_cap["holder"] != "Option Pool Reserve"].copy()
+
+            remaining_pool = current_pool - option_shares
+            if remaining_pool > 0:
+                pool_row = pd.DataFrame(
+                    [{
+                        "holder": "Option Pool Reserve",
+                        "security_type": "Option Pool",
+                        "class": "Option Pool",
+                        "shares": remaining_pool,
+                        "issue_date": date_to_str(option_issue_date),
+                    }]
+                )
+                updated_cap = pd.concat([updated_cap, pool_row], ignore_index=True)
+
+            option_row = pd.DataFrame(
+                [{
+                    "holder": option_holder,
+                    "security_type": "Option",
+                    "class": "Employee Option",
+                    "shares": option_shares,
+                    "issue_date": date_to_str(option_issue_date),
+                }]
+            )
+            updated_cap = pd.concat([updated_cap, option_row], ignore_index=True)
+            st.session_state.cap_table = updated_cap
+            st.session_state.option_pool_shares = format_number_for_input(remaining_pool)
+            st.session_state.option_pool_issue_date = option_issue_date
+            st.session_state.option_grant_shares = "0"
+            st.rerun()
+
+    if "_option_grant_error" in st.session_state:
+        st.error(st.session_state["_option_grant_error"])
+        del st.session_state["_option_grant_error"]
+
     st.markdown("### Option pool reserve")
     p1, p2 = st.columns(2)
     p1.text_input(
@@ -930,6 +1009,7 @@ with tab1:
         st.session_state.new_holder = ""
         st.session_state.new_shares = "0"
         st.session_state.option_pool_shares = "0"
+        st.session_state.option_grant_shares = "0"
         st.rerun()
 
 with tab2:
