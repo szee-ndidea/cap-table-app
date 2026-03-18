@@ -7,7 +7,7 @@ st.set_page_config(page_title="Cap Table App", layout="wide")
 st.title("Cap Table App")
 st.caption("Cap Table Management, Funding Rounds, and Exit Calculations")
 
-CAP_COLUMNS = ["holder", "security_type", "class", "shares"]
+CAP_COLUMNS = ["holder", "security_type", "class", "shares", "issue_date"]
 
 ROUND_COLUMNS = [
     "round_type",
@@ -58,10 +58,16 @@ if "new_holder" not in st.session_state:
     st.session_state.new_holder = ""
 
 if "new_shares" not in st.session_state:
-    st.session_state.new_shares = 0.0
+    st.session_state.new_shares = "0"
+
+if "new_issue_date" not in st.session_state:
+    st.session_state.new_issue_date = date.today()
 
 if "option_pool_shares" not in st.session_state:
-    st.session_state.option_pool_shares = 0.0
+    st.session_state.option_pool_shares = "0"
+
+if "option_pool_issue_date" not in st.session_state:
+    st.session_state.option_pool_issue_date = date.today()
 
 
 def empty_cap_table():
@@ -74,6 +80,36 @@ def empty_round_history():
 
 def empty_financing_details():
     return pd.DataFrame(columns=FINANCING_COLUMNS)
+
+
+def parse_numeric(value, default=0.0):
+    if value is None:
+        return default
+    if isinstance(value, (int, float)):
+        if pd.isna(value):
+            return default
+        return float(value)
+    cleaned = str(value).strip().replace(",", "")
+    if cleaned == "":
+        return default
+    try:
+        return float(cleaned)
+    except Exception:
+        return default
+
+
+def format_number_for_input(value, decimals=0):
+    try:
+        numeric = float(value)
+    except Exception:
+        numeric = 0.0
+    if decimals == 0:
+        return f"{numeric:,.0f}"
+    return f"{numeric:,.{decimals}f}"
+
+
+def text_numeric_input(label, key, value="0", help_text=None):
+    return st.text_input(label, value=value, key=key, help=help_text)
 
 
 def recalc_ownership(df: pd.DataFrame) -> pd.DataFrame:
@@ -93,9 +129,9 @@ def to_csv_bytes(df: pd.DataFrame) -> bytes:
 
 def normalize_cap_table(df: pd.DataFrame) -> pd.DataFrame:
     out = df.copy()
-    missing = [c for c in CAP_COLUMNS if c not in out.columns]
-    if missing:
-        raise ValueError(f"Missing cap table columns: {missing}")
+    for c in CAP_COLUMNS:
+        if c not in out.columns:
+            out[c] = None
     out = out[CAP_COLUMNS].copy()
     out["holder"] = out["holder"].astype(str)
     out["security_type"] = out["security_type"].astype(str)
@@ -231,6 +267,7 @@ def build_conversion_rows(
                 "security_type": "Preferred",
                 "class": equity_round_name,
                 "shares": shares_issued,
+                "issue_date": date_to_str(equity_round_date),
             }
         )
 
@@ -262,7 +299,8 @@ def build_conversion_rows(
 
 def add_starting_row():
     holder = st.session_state.get("new_holder", "").strip()
-    shares = st.session_state.get("new_shares", 0.0)
+    shares = parse_numeric(st.session_state.get("new_shares", "0"))
+    issue_date = st.session_state.get("new_issue_date", date.today())
 
     if holder and shares > 0:
         new_row = pd.DataFrame(
@@ -271,19 +309,68 @@ def add_starting_row():
                 "security_type": "Common",
                 "class": "Common",
                 "shares": shares,
+                "issue_date": date_to_str(issue_date),
             }]
         )
         st.session_state.cap_table = pd.concat(
             [st.session_state.cap_table, new_row], ignore_index=True
         )
         st.session_state.new_holder = ""
-        st.session_state.new_shares = 0.0
+        st.session_state.new_shares = "0"
     else:
         st.session_state["_add_row_error"] = "Enter a holder name and shares greater than 0."
 
 
+def apply_common_equity_change():
+    change_type = st.session_state.get("common_change_type", "Increase existing holder")
+    selected_holder = st.session_state.get("common_change_holder", "")
+    new_holder_name = st.session_state.get("common_change_new_holder", "").strip()
+    shares = parse_numeric(st.session_state.get("common_change_shares", "0"))
+    issue_date = st.session_state.get("common_change_issue_date", date.today())
+
+    if shares <= 0:
+        st.session_state["_common_change_error"] = "Enter common shares greater than 0."
+        return
+
+    if change_type == "Increase existing holder":
+        if not selected_holder:
+            st.session_state["_common_change_error"] = "Select an existing common holder."
+            return
+
+        new_row = pd.DataFrame(
+            [{
+                "holder": selected_holder,
+                "security_type": "Common",
+                "class": "Common",
+                "shares": shares,
+                "issue_date": date_to_str(issue_date),
+            }]
+        )
+    else:
+        if not new_holder_name:
+            st.session_state["_common_change_error"] = "Enter a new holder name."
+            return
+
+        new_row = pd.DataFrame(
+            [{
+                "holder": new_holder_name,
+                "security_type": "Common",
+                "class": "Common",
+                "shares": shares,
+                "issue_date": date_to_str(issue_date),
+            }]
+        )
+
+    st.session_state.cap_table = pd.concat(
+        [st.session_state.cap_table, new_row], ignore_index=True
+    )
+    st.session_state.common_change_shares = "0"
+    st.session_state.common_change_new_holder = ""
+
+
 def set_option_pool():
-    pool_shares = st.session_state.get("option_pool_shares", 0.0)
+    pool_shares = parse_numeric(st.session_state.get("option_pool_shares", "0"))
+    issue_date = st.session_state.get("option_pool_issue_date", date.today())
 
     cap = st.session_state.cap_table.copy()
     cap = cap[cap["holder"] != "Option Pool Reserve"].copy()
@@ -295,6 +382,7 @@ def set_option_pool():
                 "security_type": "Option Pool",
                 "class": "Option Pool",
                 "shares": pool_shares,
+                "issue_date": date_to_str(issue_date),
             }]
         )
         cap = pd.concat([cap, pool_row], ignore_index=True)
@@ -515,7 +603,7 @@ def build_waterfall_for_exit(
                 ascending=[False, False],
             )
 
-            for idx, row in pref_classes.iterrows():
+            for _, row in pref_classes.iterrows():
                 pref_claim = max(float(row["pref_claim"]), 0.0)
                 pref_paid = min(pref_claim, remaining_exit)
                 class_summary_df.loc[class_summary_df["class"] == row["class"], "pref_allocated"] = pref_paid
@@ -579,6 +667,7 @@ def build_waterfall_for_exit(
                     "security_type": row["security_type"],
                     "class": row["class"],
                     "shares": float(row["shares"]),
+                    "issue_date": row.get("issue_date"),
                     "exit_proceeds": payout,
                 }
             )
@@ -599,13 +688,14 @@ def build_waterfall_for_exit(
                     "security_type": row["security_type"],
                     "class": class_name,
                     "shares": float(row["shares"]),
+                    "issue_date": row.get("issue_date"),
                     "exit_proceeds": payout,
                 }
             )
 
     holder_df = pd.DataFrame(holder_rows)
     if not holder_df.empty:
-        holder_df = holder_df.groupby(["holder", "security_type", "class"], as_index=False)[["shares", "exit_proceeds"]].sum()
+        holder_df = holder_df.groupby(["holder", "security_type", "class", "issue_date"], as_index=False)[["shares", "exit_proceeds"]].sum()
 
     if class_summary_df.empty:
         class_summary_df = pd.DataFrame(
@@ -655,9 +745,9 @@ def build_exit_sensitivity_table(
     if eligible.empty or not exit_values:
         return pd.DataFrame()
 
-    base = eligible[["holder", "security_type", "class", "shares"]].copy()
+    base = eligible[["holder", "security_type", "class", "shares", "issue_date"]].copy()
     base["shares"] = pd.to_numeric(base["shares"], errors="coerce").fillna(0.0)
-    result = base.groupby(["holder", "security_type", "class"], as_index=False)["shares"].sum()
+    result = base.groupby(["holder", "security_type", "class", "issue_date"], as_index=False)["shares"].sum()
 
     total_shares = result["shares"].sum()
     result["ownership_pct_ex_option_pool"] = result["shares"] / total_shares if total_shares > 0 else 0.0
@@ -672,10 +762,10 @@ def build_exit_sensitivity_table(
         col_name = f"${exit_value:,.0f}"
         payout_map = {}
         if not holder_df.empty:
-            payout_map = holder_df.set_index(["holder", "security_type", "class"])["exit_proceeds"].to_dict()
+            payout_map = holder_df.set_index(["holder", "security_type", "class", "issue_date"])["exit_proceeds"].to_dict()
 
         result[col_name] = result.apply(
-            lambda r: payout_map.get((r["holder"], r["security_type"], r["class"]), 0.0),
+            lambda r: payout_map.get((r["holder"], r["security_type"], r["class"], r["issue_date"]), 0.0),
             axis=1,
         )
 
@@ -728,6 +818,16 @@ def format_money_columns(df: pd.DataFrame, columns: list[str], decimals: int = 2
     return out
 
 
+def format_share_columns(df: pd.DataFrame, columns: list[str], decimals: int = 2) -> pd.DataFrame:
+    out = df.copy()
+    for col in columns:
+        if col in out.columns:
+            out[col] = out[col].apply(
+                lambda x: f"{x:,.{decimals}f}" if pd.notnull(x) and x != "" else ""
+            )
+    return out
+
+
 tab1, tab2, tab3, tab4, tab5 = st.tabs(
     [
         "Starting Cap Table",
@@ -739,20 +839,20 @@ tab1, tab2, tab3, tab4, tab5 = st.tabs(
 )
 
 with tab1:
-    st.subheader("Build starting cap table")
+    st.subheader("Common Equity Table")
+    st.caption("Use dated common equity entries so the cap table itself shows when ownership changed.")
 
-    st.markdown("### Common holders")
-    col1, col2 = st.columns(2)
+    st.markdown("### Add starting common holder")
+    col1, col2, col3 = st.columns(3)
     col1.text_input("Holder name", key="new_holder")
-    col2.number_input(
+    col2.text_input(
         "Common shares",
-        min_value=0.0,
-        value=0.0,
-        step=1.0,
-        format="%g",
+        value=st.session_state.get("new_shares", "0"),
         key="new_shares",
+        help="You can type values with commas, like 1,250,000.",
         on_change=add_starting_row,
     )
+    col3.date_input("Issue date", key="new_issue_date")
 
     if st.button("Add common holder"):
         add_starting_row()
@@ -762,24 +862,64 @@ with tab1:
         st.error(st.session_state["_add_row_error"])
         del st.session_state["_add_row_error"]
 
-    st.markdown("### Option pool reserve")
-    st.number_input(
-        "Option pool reserve shares",
-        min_value=0.0,
-        value=float(st.session_state.get("option_pool_shares", 0.0)),
-        step=1.0,
-        format="%g",
-        key="option_pool_shares",
-        on_change=set_option_pool,
+    st.markdown("### Common equity changes")
+    existing_common_holders = sorted(
+        st.session_state.cap_table.loc[
+            st.session_state.cap_table["security_type"] == "Common", "holder"
+        ].dropna().astype(str).unique().tolist()
     )
+
+    c1, c2 = st.columns(2)
+    c1.selectbox(
+        "Change type",
+        ["Increase existing holder", "Add new holder"],
+        key="common_change_type",
+    )
+
+    if st.session_state.get("common_change_type") == "Increase existing holder":
+        c2.selectbox(
+            "Existing common holder",
+            options=[""] + existing_common_holders,
+            key="common_change_holder",
+        )
+    else:
+        c2.text_input("New holder name", key="common_change_new_holder")
+
+    c3, c4 = st.columns(2)
+    c3.text_input(
+        "Additional common shares",
+        value=st.session_state.get("common_change_shares", "0"),
+        key="common_change_shares",
+        help="You can type values with commas.",
+    )
+    c4.date_input("Change date", key="common_change_issue_date", value=date.today())
+
+    if st.button("Apply common equity change"):
+        apply_common_equity_change()
+        st.rerun()
+
+    if "_common_change_error" in st.session_state:
+        st.error(st.session_state["_common_change_error"])
+        del st.session_state["_common_change_error"]
+
+    st.markdown("### Option pool reserve")
+    p1, p2 = st.columns(2)
+    p1.text_input(
+        "Option pool reserve shares",
+        value=st.session_state.get("option_pool_shares", "0"),
+        key="option_pool_shares",
+        help="You can type values with commas.",
+    )
+    p2.date_input("Option pool effective date", key="option_pool_issue_date")
 
     if st.button("Update option pool reserve"):
         set_option_pool()
         st.rerun()
 
     if not st.session_state.cap_table.empty:
-        st.write("Current starting table")
+        st.write("Current common equity table")
         display_df = recalc_ownership(st.session_state.cap_table)
+        display_df = format_share_columns(display_df, ["shares"])
         display_df["ownership_pct"] = display_df["ownership_pct"].map(lambda x: f"{x:.2%}")
         st.dataframe(display_df, use_container_width=True)
 
@@ -788,8 +928,8 @@ with tab1:
         st.session_state.round_history = empty_round_history()
         st.session_state.financing_details = empty_financing_details()
         st.session_state.new_holder = ""
-        st.session_state.new_shares = 0.0
-        st.session_state.option_pool_shares = 0.0
+        st.session_state.new_shares = "0"
+        st.session_state.option_pool_shares = "0"
         st.rerun()
 
 with tab2:
@@ -813,33 +953,34 @@ with tab2:
         participation_cap_multiple = None
 
         if round_type == "Equity":
-            pre_money_valuation = st.number_input(
-                "Pre-money valuation ($)",
-                min_value=0.0,
-                value=0.0,
-                step=1000.0,
-                format="%g",
+            pre_money_valuation = parse_numeric(
+                text_numeric_input(
+                    "Pre-money valuation ($)",
+                    key="equity_pre_money_valuation",
+                    value=st.session_state.get("equity_pre_money_valuation", "0"),
+                    help_text="You can type values with commas, like 25,000,000.",
+                )
             )
 
             st.markdown("### Preferred stock terms")
-            liq_pref_multiple = st.number_input(
-                "Liquidation preference multiple (x)",
-                min_value=0.0,
-                value=1.0,
-                step=0.1,
-                format="%g",
+            liq_pref_multiple = parse_numeric(
+                text_numeric_input(
+                    "Liquidation preference multiple (x)",
+                    key="liq_pref_multiple",
+                    value=st.session_state.get("liq_pref_multiple", "1"),
+                )
             )
             participating = st.checkbox("Participating preferred", value=False)
 
             if participating:
                 has_participation_cap = st.checkbox("Participation cap", value=False)
                 if has_participation_cap:
-                    participation_cap_multiple = st.number_input(
-                        "Participation cap multiple (x)",
-                        min_value=0.0,
-                        value=3.0,
-                        step=0.1,
-                        format="%g",
+                    participation_cap_multiple = parse_numeric(
+                        text_numeric_input(
+                            "Participation cap multiple (x)",
+                            key="participation_cap_multiple",
+                            value=st.session_state.get("participation_cap_multiple", "3"),
+                        )
                     )
                 else:
                     participation_cap_multiple = None
@@ -847,46 +988,43 @@ with tab2:
                 participation_cap_multiple = None
 
         elif round_type == "SAFE":
-            valuation_cap = st.number_input(
-                "Valuation cap ($)",
-                min_value=0.0,
-                value=0.0,
-                step=1000.0,
-                format="%g",
+            valuation_cap = parse_numeric(
+                text_numeric_input(
+                    "Valuation cap ($)",
+                    key="safe_valuation_cap",
+                    value=st.session_state.get("safe_valuation_cap", "0"),
+                )
             )
-            discount_pct = st.number_input(
-                "Discount (%)",
-                min_value=0.0,
-                max_value=100.0,
-                value=0.0,
-                step=0.5,
-                format="%g",
+            discount_pct = parse_numeric(
+                text_numeric_input(
+                    "Discount (%)",
+                    key="safe_discount_pct",
+                    value=st.session_state.get("safe_discount_pct", "0"),
+                )
             )
             issue_date = st.date_input("SAFE issue date", value=round_date, key="safe_issue_date")
 
         else:
-            valuation_cap = st.number_input(
-                "Valuation cap ($)",
-                min_value=0.0,
-                value=0.0,
-                step=1000.0,
-                format="%g",
+            valuation_cap = parse_numeric(
+                text_numeric_input(
+                    "Valuation cap ($)",
+                    key="note_valuation_cap",
+                    value=st.session_state.get("note_valuation_cap", "0"),
+                )
             )
-            discount_pct = st.number_input(
-                "Discount (%)",
-                min_value=0.0,
-                max_value=100.0,
-                value=0.0,
-                step=0.5,
-                format="%g",
+            discount_pct = parse_numeric(
+                text_numeric_input(
+                    "Discount (%)",
+                    key="note_discount_pct",
+                    value=st.session_state.get("note_discount_pct", "0"),
+                )
             )
-            interest_rate_pct = st.number_input(
-                "Interest rate (%)",
-                min_value=0.0,
-                max_value=100.0,
-                value=0.0,
-                step=0.5,
-                format="%g",
+            interest_rate_pct = parse_numeric(
+                text_numeric_input(
+                    "Interest rate (%)",
+                    key="note_interest_rate_pct",
+                    value=st.session_state.get("note_interest_rate_pct", "0"),
+                )
             )
             issue_date = st.date_input("Note issue date", value=round_date, key="note_issue_date")
             maturity_date = st.date_input("Maturity date", value=round_date, key="note_maturity_date")
@@ -906,13 +1044,13 @@ with tab2:
             st.markdown(f"**Investor {i+1}**")
             c1, c2 = st.columns(2)
             investor_name = c1.text_input(f"Investor name {i+1}", key=f"inv_name_{i}")
-            amount = c2.number_input(
-                f"Amount invested {i+1} ($)",
-                min_value=0.0,
-                value=0.0,
-                step=1000.0,
-                format="%g",
-                key=f"inv_amt_{i}",
+            amount = parse_numeric(
+                c2.text_input(
+                    f"Amount invested {i+1} ($)",
+                    value=st.session_state.get(f"inv_amt_{i}", "0"),
+                    key=f"inv_amt_{i}",
+                    help="You can type values with commas.",
+                )
             )
             investors.append({"investor_name": investor_name.strip(), "amount": amount})
             total_raised += amount
@@ -941,19 +1079,13 @@ with tab2:
                 )
                 st.dataframe(outstanding_show, use_container_width=True)
 
-        new_common = st.number_input(
-            "New common shares issued outside the round",
-            min_value=0.0,
-            value=0.0,
-            step=1.0,
-            format="%g",
-        )
-        new_option_pool = st.number_input(
-            "Option pool increase",
-            min_value=0.0,
-            value=0.0,
-            step=1.0,
-            format="%g",
+        new_option_pool = parse_numeric(
+            text_numeric_input(
+                "Option pool increase",
+                key="funding_round_new_option_pool",
+                value=st.session_state.get("funding_round_new_option_pool", "0"),
+                help_text="You can type values with commas.",
+            )
         )
 
         if st.button("Apply funding round"):
@@ -967,22 +1099,6 @@ with tab2:
             )
 
             updated_cap_table = st.session_state.cap_table.copy()
-
-            if new_common > 0:
-                updated_cap_table = pd.concat(
-                    [
-                        updated_cap_table,
-                        pd.DataFrame(
-                            [{
-                                "holder": f"New Common Issuance ({clean_round_name})",
-                                "security_type": "Common",
-                                "class": "Common",
-                                "shares": new_common,
-                            }]
-                        ),
-                    ],
-                    ignore_index=True,
-                )
 
             existing_pool = updated_cap_table.loc[
                 updated_cap_table["holder"] == "Option Pool Reserve", "shares"
@@ -1001,6 +1117,7 @@ with tab2:
                                 "security_type": "Option Pool",
                                 "class": "Option Pool",
                                 "shares": existing_pool_value + new_option_pool,
+                                "issue_date": date_to_str(round_date),
                             }]
                         ),
                     ],
@@ -1049,6 +1166,7 @@ with tab2:
                                 "security_type": "Preferred",
                                 "class": clean_round_name,
                                 "shares": shares_issued,
+                                "issue_date": date_to_str(round_date),
                             }
                         )
 
@@ -1122,6 +1240,7 @@ with tab2:
                                 show_conv[col] = show_conv[col].apply(
                                     lambda x: f"${x:,.4f}" if pd.notnull(x) else ""
                                 )
+                        show_conv = format_share_columns(show_conv, ["shares_issued"], decimals=4)
                         st.dataframe(show_conv, use_container_width=True)
 
                 elif round_type == "SAFE":
@@ -1148,7 +1267,7 @@ with tab2:
                                 "shares_issued": None,
                             }
                         )
-                
+
                     if safe_rows:
                         st.session_state.financing_details = pd.concat(
                             [st.session_state.financing_details, pd.DataFrame(safe_rows)],
@@ -1197,6 +1316,7 @@ with tab3:
         st.info("No cap table data yet.")
     else:
         show = current.copy()
+        show = format_share_columns(show, ["shares"])
         show["ownership_pct"] = show["ownership_pct"].map(lambda x: f"{x:.2%}")
         st.dataframe(show, use_container_width=True)
 
@@ -1226,6 +1346,7 @@ with tab3:
                 "conversion_price",
             ],
         )
+        details_show = format_share_columns(details_show, ["shares_issued"], decimals=4)
         st.dataframe(details_show, use_container_width=True)
 
 with tab4:
@@ -1240,27 +1361,30 @@ with tab4:
         st.info("Add a cap table first before running exit analysis.")
     else:
         col1, col2 = st.columns(2)
-        low_exit = col1.number_input(
-            "Low exit value ($)",
-            min_value=0.0,
-            value=10000000.0,
-            step=1000000.0,
-            format="%g",
+        low_exit = parse_numeric(
+            col1.text_input(
+                "Low exit value ($)",
+                value=st.session_state.get("low_exit_value", "10,000,000"),
+                key="low_exit_value",
+                help="You can type values with commas.",
+            )
         )
-        high_exit = col2.number_input(
-            "High exit value ($)",
-            min_value=0.0,
-            value=200000000.0,
-            step=1000000.0,
-            format="%g",
+        high_exit = parse_numeric(
+            col2.text_input(
+                "High exit value ($)",
+                value=st.session_state.get("high_exit_value", "200,000,000"),
+                key="high_exit_value",
+                help="You can type values with commas.",
+            )
         )
 
-        preview_exit = st.number_input(
-            "Single exit value preview ($)",
-            min_value=0.0,
-            value=50000000.0,
-            step=1000000.0,
-            format="%g",
+        preview_exit = parse_numeric(
+            st.text_input(
+                "Single exit value preview ($)",
+                value=st.session_state.get("preview_exit_value", "50,000,000"),
+                key="preview_exit_value",
+                help="You can type values with commas.",
+            )
         )
 
         if st.button("Run exit sensitivity"):
@@ -1277,6 +1401,7 @@ with tab4:
                 )
 
                 display_df = sensitivity_df.copy()
+                display_df = format_share_columns(display_df, ["shares"])
                 if "ownership_pct_ex_option_pool" in display_df.columns:
                     display_df["ownership_pct_ex_option_pool"] = display_df["ownership_pct_ex_option_pool"].map(
                         lambda x: f"{x:.2%}"
@@ -1320,6 +1445,7 @@ with tab4:
 
                 if not preview_holder_df.empty:
                     preview_holder_show = preview_holder_df.copy()
+                    preview_holder_show = format_share_columns(preview_holder_show, ["shares"])
                     preview_holder_show = format_money_columns(preview_holder_show, ["exit_proceeds"])
                     st.write("Holder proceeds at preview exit value")
                     st.dataframe(preview_holder_show, use_container_width=True)
@@ -1388,14 +1514,17 @@ with tab5:
 
                 pool_mask = st.session_state.cap_table["holder"] == "Option Pool Reserve"
                 if pool_mask.any():
-                    st.session_state.option_pool_shares = float(
+                    st.session_state.option_pool_shares = format_number_for_input(
                         pd.to_numeric(
                             st.session_state.cap_table.loc[pool_mask, "shares"],
                             errors="coerce"
                         ).fillna(0.0).sum()
                     )
+                    pool_dates = st.session_state.cap_table.loc[pool_mask, "issue_date"].dropna().astype(str)
+                    if not pool_dates.empty:
+                        st.session_state.option_pool_issue_date = str_to_date(pool_dates.iloc[-1]) or date.today()
                 else:
-                    st.session_state.option_pool_shares = 0.0
+                    st.session_state.option_pool_shares = "0"
 
             if uploaded_rounds is not None:
                 round_df = pd.read_csv(uploaded_rounds)
