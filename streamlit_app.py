@@ -1204,7 +1204,6 @@ with tab2:
 
             updated_cap_table = st.session_state.cap_table.copy()
 
-
             if round_type == "Equity":
                 pre_round_shares = pd.to_numeric(updated_cap_table["shares"], errors="coerce").fillna(0.0).sum()
                 if pre_round_shares <= 0:
@@ -1622,4 +1621,3 @@ with tab5:
             st.rerun()
         except Exception as e:
             st.error(f"Could not load files: {e}")
-
