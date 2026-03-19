@@ -673,8 +673,6 @@ apply_pending_widget_resets()
 tab1, tab2, tab3, tab4, tab5 = st.tabs(["Common Equity", "Funding Round", "Current Cap Table", "Exit Analysis", "Downloads / Uploads"])
 
 with tab1:
-    st.subheader("Common Equity Table")
-    st.caption("Use dated common equity and option issuances so the cap table itself shows when ownership changed.")
     st.markdown("### Add starting common holder")
     if st.session_state.get("_reset_new_common_form"):
         st.session_state["new_holder"] = ""
@@ -808,7 +806,6 @@ with tab2:
             issue_date = round_date
             maturity_date = st.date_input("Maturity date", value=round_date, key="note_maturity_date")
         st.markdown("### Instrument / round terms")
-        st.caption("The round date is the financing date used for this round. Both post-money SAFEs and convertible notes convert only when you add a priced Equity round.")
         if round_type == "Equity":
             e1, e2, e3 = st.columns(3)
             price_per_share_override = parse_numeric(e1.text_input("Price per share override ($)", value=st.session_state.get("equity_price_per_share_override", "0"), key="equity_price_per_share_override", help="Optional. Leave 0 to derive from pre-money valuation and FD shares."))
@@ -1036,7 +1033,6 @@ with tab3:
 
 with tab4:
     st.subheader("Exit sensitivity analysis")
-    st.caption("This prototype now includes a simplified liquidation waterfall using stored equity terms. It still uses planning assumptions, excludes the unallocated option pool from direct proceeds, and should not be treated as legal-grade modeling.")
     current = recalc_ownership(st.session_state.cap_table)
     if current.empty:
         st.info("Add a cap table first before running exit analysis.")
@@ -1086,7 +1082,7 @@ with tab5:
     st.download_button("Download round history CSV", data=to_csv_bytes(st.session_state.round_history), file_name="round_history.csv", mime="text/csv")
     st.download_button("Download financing details CSV", data=to_csv_bytes(st.session_state.financing_details), file_name="financing_details.csv", mime="text/csv")
     st.divider()
-    st.subheader("Uploads / Resume")
+    st.subheader("Upload")
     st.write("Upload prior CSVs here so you can resume without restarting.")
     uploaded_cap = st.file_uploader("Upload cap table CSV", type=["csv"], key="uploaded_cap_table")
     uploaded_rounds = st.file_uploader("Upload round history CSV", type=["csv"], key="uploaded_round_history")
